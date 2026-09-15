@@ -5,6 +5,11 @@ services:
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: meshtastic
+      RAW_COMPRESS_AFTER: ${RAW_COMPRESS_AFTER}
+      HOURLY_COMPRESS_AFTER: ${HOURLY_COMPRESS_AFTER}
+      DAILY_COMPRESS_AFTER: ${DAILY_COMPRESS_AFTER}
+      INGEST_DB_PASSWORD: ${INGEST_DB_PASSWORD}
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD}
     volumes:
       - timescaledb_data:/home/postgres/pgdata/data
       - ./db/init:/docker-entrypoint-initdb.d:ro

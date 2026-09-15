@@ -10,58 +10,99 @@ treat a stale entry as a bug.
 A self-hosted database that ingests Meshtastic mesh-network protobuf
 packets from MQTT, BLE, USB-serial, and TCP/WiFi sources, stores telemetry
 + node position history + node identity in TimescaleDB/PostGIS, and serves
-Grafana as the primary visualization layer. Design rationale, alternatives
-considered, and sizing math live in the originating plan document, not in
-this repo.
+Grafana as the primary visualization layer. This file documents current,
+verifiable facts about the running system — not the full design rationale
+or sizing math behind each decision.
 
-**Current status: Phase 0 (scaffold) only.** The directory layout, config
-templates, and a two-service `docker-compose.yml` (`timescaledb` +
-`grafana`) exist and boot. No schema, decode pipeline, or ingestion
-services have been built yet — `db/init/`, `services/*/` (other than
-`common/meshdb_common/generated/`), and `grafana/provisioning/*` are
+**Current status: the schema is live.** The directory layout, config
+templates, a two-service `docker-compose.yml` (`timescaledb` + `grafana`),
+and the full TimescaleDB/PostGIS schema (`db/init/*`) exist and have been
+verified against a live container. No decode pipeline or ingestion services
+have been built yet — `services/*/` (other than
+`common/meshdb_common/generated/`) and `grafana/provisioning/*` are
 currently empty placeholders (`.gitkeep`).
 
 ## Where things live
 
-- Schema: `db/init/*.sql` — **not yet written** (Phase 1). Will hold
-  `metric`, `node_position_history`, `node_identity`, `metric_hourly`,
-  `metric_daily`, `archive_manifest`.
+- Schema: `db/init/00_extensions.sql` (timescaledb, postgis),
+  `10_schema.sql` (bare tables: `metric`, `node_position_history`,
+  `node_identity`, `archive_manifest`), `20_hypertable.sql`
+  (`create_hypertable`, indexes, generated `geom` columns),
+  `30_compression_retention.sh`, `40_continuous_aggregates.sh`
+  (`metric_hourly`, `metric_daily`, `metric_daily_v`), `50_roles.sh`
+  (`ingest_rw`, `grafana_ro`). The `.sh` files (30/40/50) are shell
+  heredoc wrappers around `psql`, not plain `.sql` — they're the ones that
+  need `.env` values (`RAW_COMPRESS_AFTER`, `HOURLY_COMPRESS_AFTER`,
+  `DAILY_COMPRESS_AFTER`, `INGEST_DB_PASSWORD`, `GRAFANA_DB_PASSWORD`)
+  interpolated, and `docker-entrypoint-initdb.d` is mounted read-only so a
+  plain `.sql` file can't be envsubst'd in place; those five env vars are
+  now passed into the `timescaledb` service in `docker-compose.yml`.
 - Decode/dispatch: `services/common/meshdb_common/decode.py` — **not yet
-  written** (Phase 2).
+  written**.
 - Shared write path (dedup, position-join, identity upsert):
-  `services/common/meshdb_common/db.py` — **not yet written** (Phase 3).
+  `services/common/meshdb_common/db.py` — **not yet written**.
 - Config: `.env.sample`, `config/regions.yaml.sample`, `secrets/*.sample` —
   copy each to its real (gitignored) filename to configure a deployment.
 - Vendored protobufs: `vendor/protobufs` (git submodule) + generated code
-  (checked in once Phase 2 runs `make proto-gen`) in
+  (checked in once the decode pipeline runs `make proto-gen`) in
   `services/common/meshdb_common/generated/`.
 
 ## Facts that must stay in sync with this file
 
 - Vendored protobufs commit: `723a31e` (`meshtastic/protobufs`, submodule
-  HEAD as of Phase 0 — update this line whenever the submodule pointer
-  moves).
-- Pinned `meshtastic` PyPI version: not yet pinned (introduced in Phase 6,
-  for `gateway-agent` transport only).
+  HEAD as of the initial scaffold — update this line whenever the
+  submodule pointer moves).
+- Pinned `meshtastic` PyPI version: not yet pinned (only needed once
+  `gateway-agent`'s transport layer is built).
 - Compose services defined so far: `timescaledb` (`timescale/timescaledb-ha:pg16`,
   host port `5432`), `grafana` (`grafana/grafana:11.3.0-ubuntu`, host port
   `3000`). No `profiles:` exist yet — `tcp-poller`/`ingest-api` and their
   `extra-sources` profile are added when those services are built.
-- DB roles (`ingest_rw`, `grafana_ro`): not yet created — no schema exists
-  (Phase 1).
-- Default retention/rollup values live in `.env.sample`
-  (`RAW_RETENTION_INTERVAL=1 year`, `RAW_COMPRESS_AFTER=10 days`,
-  `HOURLY_COMPRESS_AFTER=30 days`, `DAILY_COMPRESS_AFTER=90 days`) but are
-  inert until Phase 1's `db/init` scripts consume them.
+- DB roles: `ingest_rw` (INSERT/SELECT/UPDATE on `metric`,
+  `node_position_history`, `node_identity`, `archive_manifest`) and
+  `grafana_ro` (SELECT on `metric`, `metric_hourly`, `metric_daily`,
+  `metric_daily_v`, `node_identity`, `node_position_history`), created by
+  `db/init/50_roles.sh` with passwords from `INGEST_DB_PASSWORD` /
+  `GRAFANA_DB_PASSWORD`. Neither is yet wired into a service's connection
+  string — that happens as each ingestion/Grafana-provisioning phase lands.
+- Retention/rollup values consumed by `db/init` at first container init:
+  `RAW_COMPRESS_AFTER=10 days` (compression policy on raw `metric`),
+  `HOURLY_COMPRESS_AFTER=30 days`, `DAILY_COMPRESS_AFTER=90 days`
+  (compression policies on the two continuous aggregates). No
+  `add_retention_policy()`/drop-chunks policy exists on `metric` — the
+  archive job will drive `drop_chunks` explicitly instead;
+  `RAW_RETENTION_INTERVAL` in `.env.sample` is reserved for that job and is
+  not yet consumed by anything.
+- Continuous aggregate refresh schedules (fixed, not env-configurable):
+  `metric_hourly` refreshes every 30 min (`start_offset` 3h, `end_offset`
+  10min); `metric_daily` (built hierarchically from `metric_hourly`, not
+  raw) refreshes hourly (`start_offset` 3 days, `end_offset` 1h). Neither
+  tier ever gets a retention/drop policy — both are kept forever. Of the
+  three tiers, `metric_hourly` is the one to watch for unbounded growth:
+  raw is capped by its 1-year hot window and `metric_daily` stays
+  low-cardinality by construction, but hourly grows for as long as it's
+  kept "forever" and scales linearly with node count.
+- One known-benign warning on init: `30_compression_retention.sh` logs
+  `WARNING: column "packet_id" should be used for segmenting or ordering`
+  when compressing `metric` — expected, since `packet_id` is part of the
+  primary key but deliberately excluded from `compress_segmentby`/
+  `compress_orderby`: it's high-cardinality per row and doesn't help
+  compression segmenting.
 
 ## How to read/connect to this data
 
-Not yet applicable — no schema or data exists. Once Phase 1 lands, the
-`grafana_ro` role will be the read-only path for `metric`, `metric_hourly`,
-`metric_daily`, `node_identity`, `node_position_history`, and both `metric`
-and `node_position_history` will carry a `geom GEOGRAPHY(Point,4326)`
-column so any PostGIS-aware client can connect directly — no bespoke API
-required for read access.
+- Read-only SQL: `grafana_ro` role covers `metric`, `metric_hourly`,
+  `metric_daily`, `metric_daily_v`, `node_identity`,
+  `node_position_history` (grants cascade onto hypertable chunks and
+  continuous-aggregate internal views automatically).
+- Spatial columns: `geom GEOGRAPHY(Point,4326)` (generated, GiST-indexed)
+  on `metric` and `node_position_history` — any PostGIS-aware client
+  (QGIS, `ogr2ogr`, DuckDB spatial) can connect directly; no bespoke API
+  is required for read access.
+- No data has been ingested yet — schema only. Verified manually (insert +
+  `refresh_continuous_aggregate` + query on both `metric_hourly` and
+  `metric_daily`); no persistent test data was left behind
+  (`docker compose down -v timescaledb` after verification).
 
 ## Extension points (general — not tied to any one future feature)
 
@@ -69,23 +110,26 @@ required for read access.
   through a dedicated read-only role, not a new bespoke API — the schema is
   the stable interface.
 - A new packet-derived fact should extend the reflection-based decode path
-  (once it exists, Phase 2), not add hardcoded per-field logic — touch
+  (once it exists), not add hardcoded per-field logic — touch
   `PORTNUM_MESSAGE_MAP` only when an entirely new top-level portnum needs
   introducing.
 - A new ingestion source should call into `meshdb_common.db`'s write path
-  (once it exists, Phase 3) rather than writing to the database directly,
-  so dedup/position-join/identity logic isn't duplicated.
+  (once it exists) rather than writing to the database directly, so
+  dedup/position-join/identity logic isn't duplicated.
 
 ## Operational notes
 
 - Local dev setup: `cp .env.sample .env`, `cp config/regions.yaml.sample
   config/regions.yaml`, `cp secrets/*.sample` to their non-`.sample` names,
   then `docker compose up -d timescaledb grafana` (or `make up`).
-- Retention/rollup changes will need an explicit `make retune-retention`
-  run once Phase 1 lands, not a config reload (`docker-entrypoint-initdb.d`
-  only runs once, against an empty volume). The `retune-retention` Makefile
-  target currently exists only as a stub that exits non-zero, since there
-  is no schema yet for it to act on.
+- Retention/rollup changes need an explicit `make retune-retention` run,
+  not a config reload — `docker-entrypoint-initdb.d` only runs once,
+  against an empty volume, so editing `.env` after first init has no
+  effect on a running deployment. The `retune-retention` Makefile target
+  is still a stub that exits non-zero; the schema it would act on
+  (compression policies on `metric`/`metric_hourly`/`metric_daily`) now
+  exists, but the target itself is unimplemented pending a phase that
+  needs it.
 - `vendor/protobufs` bumps will only auto-merge once the metric-name
-  stability test (Phase 9) exists — a failure there means a human needs to
-  look, not that CI is broken.
+  stability test exists — a failure there means a human needs to look, not
+  that CI is broken.
