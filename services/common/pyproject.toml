@@ -1,0 +1,20 @@
+[project]
+name = "meshdb-common"
+version = "0.1.0"
+description = "Shared Meshtastic decode/write library for meshtastic-db's ingestion services"
+requires-python = ">=3.11"
+dependencies = [
+    "protobuf>=5,<8",
+    "cryptography",
+    "PyYAML",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["meshdb_common*"]
+
+[tool.setuptools.package-data]
+"meshdb_common" = ["generated/**/*.py", "generated/**/*.pyi"]

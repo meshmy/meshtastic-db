@@ -1,0 +1,3 @@
+# services/common/meshdb_common/generated/ is protoc output, not
+# hand-written code — excluded from lint/format rather than made compliant.
+extend-exclude = ["**/generated/"]

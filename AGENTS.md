@@ -14,13 +14,19 @@ Grafana as the primary visualization layer. This file documents current,
 verifiable facts about the running system — not the full design rationale
 or sizing math behind each decision.
 
-**Current status: the schema is live.** The directory layout, config
-templates, a two-service `docker-compose.yml` (`timescaledb` + `grafana`),
-and the full TimescaleDB/PostGIS schema (`db/init/*`) exist and have been
-verified against a live container. No decode pipeline or ingestion services
-have been built yet — `services/*/` (other than
-`common/meshdb_common/generated/`) and `grafana/provisioning/*` are
-currently empty placeholders (`.gitkeep`).
+**Current status: the schema is live and the decode library is built.** The
+directory layout, config templates, a two-service `docker-compose.yml`
+(`timescaledb` + `grafana`), the full TimescaleDB/PostGIS schema
+(`db/init/*`), and `services/common/meshdb_common` (protobuf codegen,
+reflection-based decode, PortNum dispatch, MQTT decrypt, region config
+loading) all exist and are covered by a passing unit test suite. No write
+path, ingestion service, or archive job exists yet — `services/mqtt-ingest`,
+`services/tcp-poller`, `services/gateway-agent`, `services/ingest-api`,
+`services/archive-job`, `services/common/meshdb_common/db.py`, and
+`grafana/provisioning/*` are still empty placeholders (`.gitkeep`). Nothing
+is being ingested from the configured MQTT broker yet — `.env`/
+`config/regions.yaml` point at one, but no service subscribes to it until
+mqtt-ingest is built.
 
 ## Where things live
 
@@ -37,15 +43,38 @@ currently empty placeholders (`.gitkeep`).
   interpolated, and `docker-entrypoint-initdb.d` is mounted read-only so a
   plain `.sql` file can't be envsubst'd in place; those five env vars are
   now passed into the `timescaledb` service in `docker-compose.yml`.
-- Decode/dispatch: `services/common/meshdb_common/decode.py` — **not yet
-  written**.
+- Decode/dispatch: `services/common/meshdb_common/decode.py` —
+  `walk_message()` (reflection walk, §3.3 of the design), `PORTNUM_MESSAGE_MAP`
+  / `KNOWN_UNHANDLED_PORTNUMS` (the one hardcoded PortNum dispatch table,
+  covered by a completeness test), `decode_data()`/`decode_service_envelope()`
+  (top-level dispatch, including MQTT AES-CTR decrypt), `resolve_psk()`
+  (expands a configured PSK, including the "AQ==" default-channel-key
+  sentinel).
+- Envelope types: `services/common/meshdb_common/envelope.py` —
+  `FieldValue`, `PositionFix`, `NodeIdentityUpdate`, `DecodedPacketEnvelope`
+  dataclasses; what decode.py produces and what db.py (not yet written) will
+  consume.
+- Region config: `services/common/meshdb_common/config.py`
+  (`load_regions_config()`, `resolve_secret()` for the `*_FILE` Compose-secret
+  convention) and `regions.py` (`build_subscribe_topics()`,
+  `is_region_allowed()`, `build_channel_psks()`).
 - Shared write path (dedup, position-join, identity upsert):
   `services/common/meshdb_common/db.py` — **not yet written**.
 - Config: `.env.sample`, `config/regions.yaml.sample`, `secrets/*.sample` —
   copy each to its real (gitignored) filename to configure a deployment.
-- Vendored protobufs: `vendor/protobufs` (git submodule) + generated code
-  (checked in once the decode pipeline runs `make proto-gen`) in
-  `services/common/meshdb_common/generated/`.
+- Vendored protobufs: `vendor/protobufs` (git submodule, pinned commit
+  below) + generated code (checked in, from `make proto-gen`) in
+  `services/common/meshdb_common/generated/meshtastic/`. `import meshtastic.*`
+  resolves because `meshdb_common/__init__.py` puts `generated/` on
+  `sys.path` as a side effect of importing the package — protoc's own
+  generated imports (`from meshtastic import mesh_pb2 as ...`) are absolute,
+  not package-relative.
+- Local dev/test Python environment: `services/common/pyproject.toml`
+  defines the installable `meshdb-common` package (deps: `protobuf`,
+  `cryptography`, `PyYAML`); root `requirements-dev.txt` adds `pytest`,
+  `grpcio-tools` (for `make proto-gen`), `ruff`. `ruff.toml` excludes
+  `**/generated/` from lint (protoc output, not hand-written). Set up with
+  `python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt`.
 
 ## Facts that must stay in sync with this file
 
@@ -54,6 +83,22 @@ currently empty placeholders (`.gitkeep`).
   submodule pointer moves).
 - Pinned `meshtastic` PyPI version: not yet pinned (only needed once
   `gateway-agent`'s transport layer is built).
+- PortNum coverage: of the 41 values currently in `portnums_pb2.PortNum`, 7
+  are dispatched via `PORTNUM_MESSAGE_MAP` (Position, NodeInfo, Telemetry,
+  Routing, NeighborInfo, Traceroute, MapReport) and the remaining 34 are
+  deliberately unhandled via `KNOWN_UNHANDLED_PORTNUMS` — enforced by
+  `tests/test_portnum_coverage.py`, which fails if a submodule bump adds a
+  portnum not present in either collection.
+- MQTT decrypt (`decode.decrypt_payload`/`resolve_psk`) implements AES-CTR
+  with a nonce of packet_id (8 bytes LE) + from-node (4 bytes LE) + 4 zero
+  bytes, and expands the "AQ==" single-byte PSK sentinel to Meshtastic's
+  fixed default channel key. Both are implemented from general knowledge of
+  Meshtastic's crypto scheme, self-consistently round-trip tested, but not
+  yet verified against real firmware-encrypted traffic — that verification
+  happens with the MQTT corpus replay test once mqtt-ingest and a live
+  database exist. If real encrypted MQTT traffic decodes as
+  `UNDECRYPTABLE` despite a correct configured PSK, this is the first place
+  to check.
 - Compose services defined so far: `timescaledb` (`timescale/timescaledb-ha:pg16`,
   host port `5432`), `grafana` (`grafana/grafana:11.3.0-ubuntu`, host port
   `3000`). No `profiles:` exist yet — `tcp-poller`/`ingest-api` and their
@@ -110,9 +155,9 @@ currently empty placeholders (`.gitkeep`).
   through a dedicated read-only role, not a new bespoke API — the schema is
   the stable interface.
 - A new packet-derived fact should extend the reflection-based decode path
-  (once it exists), not add hardcoded per-field logic — touch
-  `PORTNUM_MESSAGE_MAP` only when an entirely new top-level portnum needs
-  introducing.
+  (`meshdb_common.decode.walk_message`), not add hardcoded per-field logic —
+  touch `PORTNUM_MESSAGE_MAP` only when an entirely new top-level portnum
+  needs introducing.
 - A new ingestion source should call into `meshdb_common.db`'s write path
   (once it exists) rather than writing to the database directly, so
   dedup/position-join/identity logic isn't duplicated.
@@ -122,6 +167,12 @@ currently empty placeholders (`.gitkeep`).
 - Local dev setup: `cp .env.sample .env`, `cp config/regions.yaml.sample
   config/regions.yaml`, `cp secrets/*.sample` to their non-`.sample` names,
   then `docker compose up -d timescaledb grafana` (or `make up`).
+- Python dev/test setup (for `meshdb_common`, independent of the above):
+  `python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt`,
+  then `.venv/bin/pytest tests/` or `.venv/bin/ruff check services/ tests/`
+  (or `make test`/`make lint` with the venv active). `make proto-gen` needs
+  the same venv (`grpcio-tools`) and the `vendor/protobufs` submodule
+  checked out.
 - Retention/rollup changes need an explicit `make retune-retention` run,
   not a config reload — `docker-entrypoint-initdb.d` only runs once,
   against an empty volume, so editing `.env` after first init has no
