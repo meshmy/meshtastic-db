@@ -50,6 +50,23 @@ services:
     secrets:
       - mqtt_password
 
+  tcp-poller:
+    build:
+      context: .
+      dockerfile: services/tcp-poller/Dockerfile
+    restart: unless-stopped
+    profiles: ["extra-sources"]
+    depends_on:
+      - timescaledb
+    environment:
+      INGEST_DB_HOST: timescaledb
+      INGEST_DB_PORT: 5432
+      INGEST_DB_NAME: meshtastic
+      INGEST_DB_PASSWORD: ${INGEST_DB_PASSWORD}
+      REGIONS_CONFIG_PATH: /config/regions.yaml
+    volumes:
+      - ./config/regions.yaml:/config/regions.yaml:ro
+
 volumes:
   timescaledb_data:
   grafana_data:
