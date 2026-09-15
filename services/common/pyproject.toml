@@ -7,6 +7,7 @@ dependencies = [
     "protobuf>=5,<8",
     "cryptography",
     "PyYAML",
+    "psycopg[binary]>=3.1,<4",
 ]
 
 [build-system]

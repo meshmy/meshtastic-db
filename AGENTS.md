@@ -14,19 +14,20 @@ Grafana as the primary visualization layer. This file documents current,
 verifiable facts about the running system — not the full design rationale
 or sizing math behind each decision.
 
-**Current status: the schema is live and the decode library is built.** The
-directory layout, config templates, a two-service `docker-compose.yml`
-(`timescaledb` + `grafana`), the full TimescaleDB/PostGIS schema
-(`db/init/*`), and `services/common/meshdb_common` (protobuf codegen,
-reflection-based decode, PortNum dispatch, MQTT decrypt, region config
-loading) all exist and are covered by a passing unit test suite. No write
-path, ingestion service, or archive job exists yet — `services/mqtt-ingest`,
-`services/tcp-poller`, `services/gateway-agent`, `services/ingest-api`,
-`services/archive-job`, `services/common/meshdb_common/db.py`, and
-`grafana/provisioning/*` are still empty placeholders (`.gitkeep`). Nothing
-is being ingested from the configured MQTT broker yet — `.env`/
-`config/regions.yaml` point at one, but no service subscribes to it until
-mqtt-ingest is built.
+**Current status: the schema, decode library, and shared write path are all
+built.** The directory layout, config templates, a two-service
+`docker-compose.yml` (`timescaledb` + `grafana`), the full
+TimescaleDB/PostGIS schema (`db/init/*`), `services/common/meshdb_common`'s
+decode side (protobuf codegen, reflection-based decode, PortNum dispatch,
+MQTT decrypt, region config loading), and its write side (`db.py` — batched
+insert, dedup, as-of position join, identity upsert) all exist and are
+covered by a passing test suite (unit tests plus one Docker-backed
+integration suite, see below). No ingestion service or archive job exists
+yet — `services/mqtt-ingest`, `services/tcp-poller`, `services/gateway-agent`,
+`services/ingest-api`, `services/archive-job`, and `grafana/provisioning/*`
+are still empty placeholders (`.gitkeep`). Nothing is being ingested from
+the configured MQTT broker yet — `.env`/`config/regions.yaml` point at one,
+but no service subscribes to it until mqtt-ingest is built.
 
 ## Where things live
 
@@ -52,14 +53,30 @@ mqtt-ingest is built.
   sentinel).
 - Envelope types: `services/common/meshdb_common/envelope.py` —
   `FieldValue`, `PositionFix`, `NodeIdentityUpdate`, `DecodedPacketEnvelope`
-  dataclasses; what decode.py produces and what db.py (not yet written) will
-  consume.
+  dataclasses; what decode.py produces and db.py consumes.
 - Region config: `services/common/meshdb_common/config.py`
   (`load_regions_config()`, `resolve_secret()` for the `*_FILE` Compose-secret
   convention) and `regions.py` (`build_subscribe_topics()`,
   `is_region_allowed()`, `build_channel_psks()`).
-- Shared write path (dedup, position-join, identity upsert):
-  `services/common/meshdb_common/db.py` — **not yet written**.
+- Shared write path: `services/common/meshdb_common/db.py` —
+  `write_envelopes(conn, envelopes)` is the single entry point every
+  ingestion source will call. It takes a plain `psycopg.Connection` (the
+  module has no opinion on how a caller obtains one — that's each
+  ingestion service's own concern) and a batch of `DecodedPacketEnvelope`,
+  and in one transaction: appends `Position` envelopes to
+  `node_position_history` (ON CONFLICT `(time, node_id)` DO NOTHING),
+  upserts `User`/NodeInfo envelopes into `node_identity` (latest-by-`time`
+  wins; a batch is first collapsed to one row per `node_id` in Python
+  because Postgres rejects an `ON CONFLICT ... DO UPDATE` that would affect
+  the same row twice in one statement — DO NOTHING inserts have no such
+  restriction, so `metric`/positions don't need this collapse), then
+  inserts every envelope's `fields` into `metric` via a `LEFT JOIN LATERAL`
+  against `node_position_history` (ON CONFLICT `(time, node_id,
+  metric_name, packet_id)` DO NOTHING) — positions are written first in
+  the same transaction specifically so a `Position` envelope earlier in a
+  batch is already visible to that join for a later envelope in the same
+  batch. All three inserts use `unnest()` over parallel Python lists (one
+  round trip per batch per table), not one round trip per row.
 - Config: `.env.sample`, `config/regions.yaml.sample`, `secrets/*.sample` —
   copy each to its real (gitignored) filename to configure a deployment.
 - Vendored protobufs: `vendor/protobufs` (git submodule, pinned commit
@@ -71,10 +88,24 @@ mqtt-ingest is built.
   not package-relative.
 - Local dev/test Python environment: `services/common/pyproject.toml`
   defines the installable `meshdb-common` package (deps: `protobuf`,
-  `cryptography`, `PyYAML`); root `requirements-dev.txt` adds `pytest`,
-  `grpcio-tools` (for `make proto-gen`), `ruff`. `ruff.toml` excludes
-  `**/generated/` from lint (protoc output, not hand-written). Set up with
-  `python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt`.
+  `cryptography`, `PyYAML`, `psycopg[binary]>=3.1,<4`); root
+  `requirements-dev.txt` adds `pytest`, `grpcio-tools` (for `make
+  proto-gen`), `ruff`, `testcontainers` (for the `db.py` integration test
+  only). `ruff.toml` excludes `**/generated/` from lint (protoc output, not
+  hand-written). Set up with `python3 -m venv .venv && .venv/bin/pip install
+  -r requirements-dev.txt`.
+- Test configuration: root `pytest.ini` registers an `integration` marker
+  and sets `addopts = -m "not integration"`, so `pytest tests/`/`make test`
+  runs only the fast, Docker-free unit tests by default.
+  `tests/test_db_write_path.py` is the one test module marked
+  `integration` — it spins up a real, disposable
+  `timescale/timescaledb-ha:pg16` container running the actual
+  `db/init/*` scripts (via `testcontainers`' generic `DockerContainer`,
+  not the `testcontainers.postgres` module, so it can mount `db/init` at
+  `/docker-entrypoint-initdb.d` exactly like `docker-compose.yml` does),
+  connects as `ingest_rw` (not the superuser, so the test also exercises
+  `50_roles.sh`'s actual grants), and exercises `write_envelopes()`
+  end-to-end. Run it with `make test-integration`.
 
 ## Facts that must stay in sync with this file
 
@@ -104,12 +135,27 @@ mqtt-ingest is built.
   `3000`). No `profiles:` exist yet — `tcp-poller`/`ingest-api` and their
   `extra-sources` profile are added when those services are built.
 - DB roles: `ingest_rw` (INSERT/SELECT/UPDATE on `metric`,
-  `node_position_history`, `node_identity`, `archive_manifest`) and
+  `node_position_history`, `node_identity`, `archive_manifest` — no
+  DELETE/TRUNCATE, confirmed by the integration test above) and
   `grafana_ro` (SELECT on `metric`, `metric_hourly`, `metric_daily`,
   `metric_daily_v`, `node_identity`, `node_position_history`), created by
   `db/init/50_roles.sh` with passwords from `INGEST_DB_PASSWORD` /
-  `GRAFANA_DB_PASSWORD`. Neither is yet wired into a service's connection
-  string — that happens as each ingestion/Grafana-provisioning phase lands.
+  `GRAFANA_DB_PASSWORD`. `db.py`'s `write_envelopes()` only ever needs
+  `ingest_rw`'s grants (INSERT + the UPDATE that `ON CONFLICT ... DO
+  UPDATE` needs for `node_identity`). Neither role is yet wired into an
+  ingestion service's connection string — `db.py` takes a connection the
+  caller already opened, so that wiring happens as each ingestion/
+  Grafana-provisioning phase lands, not here.
+- **Running `db.py`'s integration test on macOS via colima**: testcontainers'
+  default cleanup ("Ryuk") bind-mounts the host Docker socket into its own
+  reaper container, which fails under colima specifically (`mkdir
+  .../docker.sock: operation not supported` — the socket path is on the
+  macOS side, not reachable as a bind-mount source inside the colima Linux
+  VM). Worked around by exporting `TESTCONTAINERS_RYUK_DISABLED=true`
+  (`make test-integration` already sets it) — normal container teardown on
+  the success/exit path is unaffected, since `testcontainers` still calls
+  `stop()` itself; only the crash-safety-net reaper is disabled. Applies
+  to any future Docker-backed test in this repo, not just this one.
 - Retention/rollup values consumed by `db/init` at first container init:
   `RAW_COMPRESS_AFTER=10 days` (compression policy on raw `metric`),
   `HOURLY_COMPRESS_AFTER=30 days`, `DAILY_COMPRESS_AFTER=90 days`
@@ -158,9 +204,11 @@ mqtt-ingest is built.
   (`meshdb_common.decode.walk_message`), not add hardcoded per-field logic —
   touch `PORTNUM_MESSAGE_MAP` only when an entirely new top-level portnum
   needs introducing.
-- A new ingestion source should call into `meshdb_common.db`'s write path
-  (once it exists) rather than writing to the database directly, so
-  dedup/position-join/identity logic isn't duplicated.
+- A new ingestion source should call `meshdb_common.db.write_envelopes()`
+  rather than writing to the database directly, so dedup/position-join/
+  identity logic isn't duplicated. It only needs a `psycopg.Connection` (as
+  `ingest_rw`) and a batch of `DecodedPacketEnvelope` — it has no opinion
+  on transport, batching cadence, or how the connection was obtained.
 
 ## Operational notes
 
@@ -172,7 +220,9 @@ mqtt-ingest is built.
   then `.venv/bin/pytest tests/` or `.venv/bin/ruff check services/ tests/`
   (or `make test`/`make lint` with the venv active). `make proto-gen` needs
   the same venv (`grpcio-tools`) and the `vendor/protobufs` submodule
-  checked out.
+  checked out. `make test-integration` needs Docker (colima on macOS — see
+  the Ryuk/colima note above) and runs the one `db.py` integration test
+  separately from `make test`.
 - Retention/rollup changes need an explicit `make retune-retention` run,
   not a config reload — `docker-entrypoint-initdb.d` only runs once,
   against an empty volume, so editing `.env` after first init has no
