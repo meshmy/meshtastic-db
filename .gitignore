@@ -1,0 +1,16 @@
+# Local deployment config — copy from the committed *.sample instead
+.env
+config/regions.yaml
+secrets/*
+!secrets/*.sample
+
+# Archive tier is a bind-mounted local Parquet root, not repo content
+archive/*
+!archive/.gitkeep
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+.DS_Store

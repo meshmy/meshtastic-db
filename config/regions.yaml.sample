@@ -1,0 +1,27 @@
+# Copy to config/regions.yaml (gitignored) and edit for your deployment.
+#
+# allowed_regions is opt-in by design: nothing is ingested for a region not
+# listed here, even if traffic for it is visible on a subscribed broker.
+# There's no universally-safe default region, so this ships empty.
+allowed_regions: []
+# allowed_regions: [MY_919, MY_433]
+
+mqtt:
+  # version: 'e' (>=2.3.0) or 'c' (legacy) — subscribe both.
+  topic_template: "msh/{region}/2/{version}/#"
+  brokers:
+    - host: ${MQTT_HOST}
+      port: 8883
+      tls: true
+  channels:
+    - name: LongFast
+      psk_base64: "AQ=="
+
+tcp_nodes: []
+# tcp_nodes:
+#   - host: 192.168.1.50
+#     region: MY_919
+
+gateway_agent:
+  region: null   # one static region per physical agent instance
+  connection: {type: serial, port: /dev/ttyUSB0}   # or {type: ble, ble_address: AA:BB:...}
