@@ -19,5 +19,5 @@ lint:
 	ruff check services/ tests/
 
 retune-retention:
-	@echo "retune-retention: not yet implemented — needs the schema from Phase 1"
+	@echo "retune-retention: not yet implemented"
 	@exit 1
