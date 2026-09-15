@@ -25,6 +25,10 @@ from .envelope import DecodedPacketEnvelope, FieldValue, NodeIdentityUpdate, Pos
 
 PortNum = portnums_pb2.PortNum
 
+# A config/regions.yaml channel entry named this is a fallback PSK tried for
+# any channel_id with no specific entry of its own — see decode_service_envelope.
+WILDCARD_CHANNEL = "*"
+
 # The one hardcoded portnum -> payload-message-class dispatch table: a new
 # *field* inside one of these messages needs no change here (walk_message
 # picks it up automatically); only an entirely new top-level portnum does.
@@ -267,7 +271,19 @@ def decode_service_envelope(
     }
 
     if packet.WhichOneof("payload_variant") == "encrypted":
-        psk = channel_psks.get(envelope.channel_id)
+        # A channel keyed by name takes priority; "*" (WILDCARD_CHANNEL) is
+        # a fallback tried for any channel_id with no specific entry — the
+        # default PSK ("AQ==") is a single fixed key independent of channel
+        # name (Meshtastic's default-preset channels — LongFast, ShortFast,
+        # MediumSlow, etc. — and any custom-named channel left on the
+        # default key all use it), so one wildcard entry decrypts all of
+        # them without enumerating every possible name. A channel actually
+        # using a different, unconfigured custom PSK will still attempt
+        # decryption against the wildcard key and most likely fail to
+        # parse as a valid Data message (caught below as UNDECRYPTABLE),
+        # since there's no way to tell "uses the default key" and "uses an
+        # unknown custom key" apart from channel_id alone.
+        psk = channel_psks.get(envelope.channel_id, channel_psks.get(WILDCARD_CHANNEL))
         if psk is None:
             return DecodedPacketEnvelope(packet_type="UNDECRYPTABLE", portnum=None, **common_kwargs)
         try:

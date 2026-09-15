@@ -173,13 +173,30 @@ placeholders (`.gitkeep`).
 - MQTT decrypt (`decode.decrypt_payload`/`resolve_psk`) implements AES-CTR
   with a nonce of packet_id (8 bytes LE) + from-node (4 bytes LE) + 4 zero
   bytes, and expands the "AQ==" single-byte PSK sentinel to Meshtastic's
-  fixed default channel key. Both are implemented from general knowledge of
-  Meshtastic's crypto scheme, self-consistently round-trip tested, but not
-  yet verified against real firmware-encrypted traffic — that verification
-  happens with the MQTT corpus replay test once mqtt-ingest and a live
-  database exist. If real encrypted MQTT traffic decodes as
-  `UNDECRYPTABLE` despite a correct configured PSK, this is the first place
-  to check.
+  fixed default channel key. Verified against real firmware-encrypted
+  traffic (manually, running `mqtt-ingest` against a live personal broker;
+  telemetry rows landed in `metric` correctly), not just the
+  self-consistent round-trip unit tests and the corpus-replay test's
+  synthetic packets. If real encrypted MQTT traffic decodes as
+  `UNDECRYPTABLE` despite a correct configured PSK, this is still the first
+  place to check.
+- Channel PSK lookup (`decode.decode_service_envelope`) supports a
+  wildcard channel entry: `config/regions.yaml`'s `mqtt.channels` may
+  include one named `"*"` (`decode.WILDCARD_CHANNEL`), tried whenever an
+  incoming `ServiceEnvelope.channel_id` doesn't match any explicitly-named
+  entry. This exists because the default PSK is a single fixed key
+  independent of channel name — Meshtastic's default-modem-preset channel
+  names (`LongFast`, `ShortFast`, `MediumSlow`, etc.) and any custom-named
+  channel left on the default key all decrypt with it — so one `"*"` entry
+  with `psk_base64: "AQ=="` (the shipped sample/local default) covers all
+  of them without enumerating every preset name. An exact `channel_id`
+  match always takes priority over `"*"` when both are configured, so a
+  channel with a genuinely custom PSK can still be named explicitly. A
+  channel using an unconfigured custom (non-default) PSK will still be
+  attempted against `"*"`'s key and almost always fail to parse as a valid
+  `Data` message (caught as `UNDECRYPTABLE`, same as before) — there's no
+  way to distinguish "uses the default key" from "uses an unknown custom
+  key" from `channel_id` alone.
 - Compose services defined so far: `timescaledb` (`timescale/timescaledb-ha:pg16`,
   host port `5432`), `grafana` (`grafana/grafana:11.3.0-ubuntu`, host port
   `3000`), `mqtt-ingest` (built locally from `services/mqtt-ingest/Dockerfile`,

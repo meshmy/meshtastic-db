@@ -19,7 +19,7 @@ def test_load_regions_config_expands_env_vars(monkeypatch):
     cfg = load_regions_config(SAMPLE_PATH)
 
     assert cfg.mqtt.brokers[0].host == "mqtt.example.org"
-    assert cfg.mqtt.channels[0].name == "LongFast"
+    assert cfg.mqtt.channels[0].name == "*"
     # Shipped empty by design — there's no universally-safe default region.
     assert cfg.allowed_regions == ()
 
@@ -47,7 +47,7 @@ def test_load_regions_config_resolves_channel_psks(monkeypatch):
     cfg = load_regions_config(SAMPLE_PATH)
 
     psks = build_channel_psks(cfg)
-    assert psks["LongFast"] == resolve_psk("AQ==")
+    assert psks["*"] == resolve_psk("AQ==")
 
 
 def test_resolve_secret_prefers_file_over_plain_env(tmp_path, monkeypatch):

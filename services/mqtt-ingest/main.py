@@ -15,6 +15,7 @@ import logging
 import os
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 
 import psycopg
@@ -86,7 +87,8 @@ class EnvelopeBatcher:
             self._oldest_at = None
         if batch:
             write_envelopes(self._conn, batch)
-            logger.info("wrote %d envelope(s)", len(batch))
+            by_packet_type = dict(Counter(env.packet_type for env in batch))
+            logger.info("wrote batch of %d envelope(s): %s", len(batch), by_packet_type)
 
 
 def handle_message(

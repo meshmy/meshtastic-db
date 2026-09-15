@@ -14,7 +14,13 @@ mqtt:
       port: 8883
       tls: true
   channels:
-    - name: LongFast
+    # "*" is a wildcard fallback tried for any channel_id with no entry of
+    # its own — the default PSK ("AQ==") is a single fixed key independent
+    # of channel name, so this one entry decrypts LongFast, ShortFast,
+    # MediumSlow, and every other default-modem-preset-named or
+    # custom-named channel left on the default key. Add a channel by its
+    # actual name only when it uses a genuinely custom (non-default) PSK.
+    - name: "*"
       psk_base64: "AQ=="
 
 tcp_nodes: []
