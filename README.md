@@ -5,9 +5,10 @@ from MQTT, BLE, USB-serial, and TCP/WiFi sources, retains the data
 indefinitely at bounded storage cost via tiered rollups, and serves Grafana
 as the primary visualization layer.
 
-Status: schema, decode library, and the MQTT ingestion service are built.
-See [AGENTS.md](AGENTS.md) for what currently exists and how the repo is
-laid out.
+Status: schema, decode library, and all four ingestion services
+(mqtt-ingest, tcp-poller, ingest-api, gateway-agent) are built. See
+[AGENTS.md](AGENTS.md) for what currently exists and how the repo is laid
+out.
 
 ## Quickstart (current scope)
 
@@ -25,9 +26,16 @@ docker compose up -d
 Grafana: http://localhost:3000 (default admin password from `.env`).
 Postgres/TimescaleDB: `localhost:5432`. `mqtt-ingest` subscribes to
 `allowed_regions` on the broker in `config/regions.yaml` and writes decoded
-packets straight to Postgres — no other ingestion source is wired up yet.
+packets straight to Postgres.
 
-Other ingestion sources and the demo dashboard land in later phases — see
+`tcp-poller` (polls `tcp_nodes` in `config/regions.yaml`) and `ingest-api`
+(an HTTP front door for remote `gateway-agent` instances) both start with
+`docker compose --profile extra-sources up -d`. `gateway-agent` itself runs
+separately, on whatever host has BLE/USB access to a radio — see
+`docker-compose.gateway-agent.yml` and
+[AGENTS.md](AGENTS.md)'s operational notes.
+
+The demo dashboard and the archive job land in later phases — see
 [AGENTS.md](AGENTS.md) for current status.
 
 ## License

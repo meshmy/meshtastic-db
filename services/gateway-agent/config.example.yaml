@@ -1,0 +1,23 @@
+# Copy to config.yaml (per agent instance, not committed) and edit for your
+# deployment. One gateway-agent instance == one radio == one static region.
+region: MY_433
+
+connection:
+  type: serial              # or: type: ble
+  port: /dev/ttyUSB0
+  # ble_address: AA:BB:CC:DD:EE:FF   (used when type: ble instead)
+
+ingest_api:
+  # Reachable ingest-api instance this agent forwards decoded packets to.
+  url: http://ingest-api.example.org:8000/v1/ingest
+
+batch:
+  size: 50
+  interval_seconds: 2
+
+wal:
+  # Append-only local spillover for batches that couldn't be POSTed (network
+  # partition, ingest-api down) — replayed on the next successful send
+  # instead of being dropped. Needs to be on a volume that survives an
+  # agent container restart.
+  path: /var/lib/gateway-agent/wal.jsonl

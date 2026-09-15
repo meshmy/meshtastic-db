@@ -1,3 +1,9 @@
 # services/common/meshdb_common/generated/ is protoc output, not
 # hand-written code — excluded from lint/format rather than made compliant.
 extend-exclude = ["**/generated/"]
+
+[lint.flake8-bugbear]
+# FastAPI's own required idiom is a function call (Depends(...)) as an
+# argument default — not the mutable-default-argument bug B008 otherwise
+# guards against.
+extend-immutable-calls = ["fastapi.Depends"]

@@ -14,23 +14,27 @@ Grafana as the primary visualization layer. This file documents current,
 verifiable facts about the running system — not the full design rationale
 or sizing math behind each decision.
 
-**Current status: the schema, decode library, shared write path, and the
-mqtt-ingest and tcp-poller services are all built.** The directory layout,
-config templates, the TimescaleDB/PostGIS schema (`db/init/*`),
-`services/common/meshdb_common`'s decode side (protobuf codegen,
-reflection-based decode, PortNum dispatch, MQTT decrypt, region config
-loading), its write side (`db.py` — batched insert, dedup, as-of position
-join, identity upsert), its shared ingestion-service plumbing (`batching.py`,
-`connect.py`, `stream_framing.py` — see below), `services/mqtt-ingest` (the
-central MQTT subscriber), and `services/tcp-poller` (the central TCP
-poller) all exist and are covered by a passing test suite (unit tests plus
-Docker-backed integration suites, see below). `docker-compose.yml` now has
-four services: `timescaledb`, `grafana`, `mqtt-ingest` (no `profiles:` —
-starts by default with a plain `docker compose up`), `tcp-poller` (built
-from `services/tcp-poller/Dockerfile`, behind `profiles: ["extra-sources"]`
-— not started by a plain `docker compose up`). `services/gateway-agent`,
-`services/ingest-api`, `services/archive-job`, and `grafana/provisioning/*`
-are still empty placeholders (`.gitkeep`).
+**Current status: the schema, decode library, shared write path, and all
+four ingestion services (mqtt-ingest, tcp-poller, ingest-api,
+gateway-agent) are built.** The directory layout, config templates, the
+TimescaleDB/PostGIS schema (`db/init/*`), `services/common/meshdb_common`'s
+decode side (protobuf codegen, reflection-based decode, PortNum dispatch,
+MQTT decrypt, region config loading), its write side (`db.py` — batched
+insert, dedup, as-of position join, identity upsert), its shared
+ingestion-service plumbing (`batching.py`, `connect.py`,
+`stream_framing.py`, `serialization.py` — see below), `services/mqtt-ingest`
+(the central MQTT subscriber), `services/tcp-poller` (the central TCP
+poller), `services/ingest-api` (the HTTP front door for remote
+gateway-agents), and `services/gateway-agent` (the BLE/serial agent for a
+host with physical radio access) all exist and are covered by a passing
+test suite (unit tests plus Docker-backed integration suites, see below).
+`docker-compose.yml` now has five services: `timescaledb`, `grafana`,
+`mqtt-ingest` (no `profiles:` — starts by default with a plain `docker
+compose up`), `tcp-poller` and `ingest-api` (both built locally, behind
+`profiles: ["extra-sources"]` — not started by a plain `docker compose
+up`). `docker-compose.gateway-agent.yml` is a separate, standalone compose
+file for a remote host with radio access. `services/archive-job` and
+`grafana/provisioning/*` are still empty placeholders (`.gitkeep`).
 
 ## Where things live
 
@@ -75,6 +79,12 @@ are still empty placeholders (`.gitkeep`).
 - Envelope types: `services/common/meshdb_common/envelope.py` —
   `FieldValue`, `PositionFix`, `NodeIdentityUpdate`, `DecodedPacketEnvelope`
   dataclasses; what decode.py produces and db.py consumes.
+- Envelope JSON (de)serialization:
+  `services/common/meshdb_common/serialization.py` —
+  `envelope_to_dict()`/`envelope_from_dict()`, the wire format between
+  gateway-agent (decodes locally, has no DB access) and ingest-api (writes
+  to Postgres, has no decode logic of its own), and also gateway-agent's
+  own WAL line format.
 - Region config: `services/common/meshdb_common/config.py`
   (`load_regions_config()`, `resolve_secret()` for the `*_FILE` Compose-secret
   convention) and `regions.py` (`build_subscribe_topics()`,
@@ -145,12 +155,87 @@ are still empty placeholders (`.gitkeep`).
   `reconnect_delay` so a test can point it at a fake TCP server on an
   ephemeral port. Credentials: only `INGEST_DB_PASSWORD` — the TCP local API
   has no authentication of its own.
+- `services/ingest-api/main.py` — thin FastAPI HTTP front door for remote
+  `gateway-agent` instances that can't reach Postgres directly:
+  `create_app(conn=None, cfg=None)` is a factory (tests inject an
+  already-open connection/config; the container entrypoint's bare `app` at
+  module level calls it with no arguments, so `uvicorn main:app` gets a
+  real one via `connect_with_retry()`/`load_regions_config()` lazily, at
+  `lifespan` startup, not at import time). `POST /v1/ingest` takes a JSON
+  array of envelopes in `meshdb_common.serialization`'s wire format,
+  requires `Authorization: Bearer <INGEST_API_TOKEN>` (checked via
+  `resolve_secret`, so `INGEST_API_TOKEN_FILE` — the Compose-secret
+  convention — works too), drops any envelope whose `region` isn't in
+  `allowed_regions` (defense in depth against a misconfigured
+  gateway-agent, the same pattern mqtt-ingest/tcp-poller apply to their own
+  transports) and logs a warning per drop, then calls the same
+  `write_envelopes()` every other ingestion source uses — this service has
+  no decode logic of its own. Writes are serialized behind a
+  `threading.Lock` around one shared `psycopg.Connection` rather than a
+  connection pool: §8's own sizing (tens of rows/sec network-wide) makes a
+  pool unnecessary. `GET /healthz` for container health checks.
+- `services/gateway-agent/main.py` — the BLE/serial agent for a host with
+  physical radio access, POSTing decoded envelopes to `ingest-api` instead
+  of writing to Postgres directly. **Does not depend on the `meshtastic`
+  PyPI package** — this was flagged in the design as needing a
+  transport-interception spike before implementation, and the spike's
+  conclusion (see the module's own docstring for the full reasoning) is
+  that depending on it is actively wrong, not just unnecessary: that
+  package's bundled protobuf classes live at the exact same import path
+  (`meshtastic.mesh_pb2` etc.) this repo's own generated classes are put on
+  via `meshdb_common/__init__.py`'s sys.path insertion, and since a regular
+  package (the pip one) always wins that name over a namespace-package
+  portion (this repo's `generated/meshtastic/`, which has no `__init__.py`)
+  regardless of sys.path order, having both installed in one interpreter
+  would silently make every decode in that process use the pip package's
+  (possibly stale) schema instead of this repo's freshly-regenerated one.
+  Serial reuses `meshdb_common.stream_framing`/`mesh_pb2` directly via
+  `pyserial` — the same wire framing tcp-poller already proves works for
+  the TCP local API, since Meshtastic's serial and TCP local APIs are
+  documented to share it. BLE uses `bleak` against Meshtastic's documented
+  GATT UUIDs (`BLE_FROMRADIO_UUID`/`BLE_TORADIO_UUID`/`BLE_FROMNUM_UUID`)
+  directly, instead of the `meshtastic` package's `BLEInterface` — **not
+  validated against real BLE hardware** (only the serial path and the
+  decode/batch/HTTP-forward plumbing downstream of "raw FromRadio bytes
+  off the wire" are tested; see below). Both `serial`/`bleak` imports are
+  deferred into their respective transport functions rather than done at
+  module load time, so the module (and everything downstream of it) stays
+  importable/testable even in an environment with only one of the two
+  installed. `Wal` (append-only JSONL spillover) and `IngestApiSender`
+  (POSTs a batch, always replays any pending WAL backlog first and in
+  order, spills the current batch to WAL on any failure including the
+  backlog's own replay) give the "batches decoded envelopes and POSTs to
+  ingest-api; on network failure, spills to a local append-only WAL file
+  and replays on reconnect" behavior from the design. `HttpEnvelopeBatcher`
+  is the HTTP-forwarding analogue of `meshdb_common.batching.EnvelopeBatcher`
+  (same size/interval-threshold flush logic) — kept local to this service
+  rather than factored into `meshdb_common`, since its flush target and
+  failure handling (WAL spillover) differ enough from the DB-writing
+  batcher that sharing would need its own seam, and only this one service
+  needs it. Config: `config.example.yaml` (copy to `config.yaml` per agent
+  instance) — one static `region` and one `connection` (`{type: serial,
+  port: ...}` or `{type: ble, ble_address: ...}`) per agent instance, an
+  `ingest_api.url`, and a `wal.path`; the bearer token itself comes from
+  `INGEST_API_TOKEN`/`INGEST_API_TOKEN_FILE`, not the YAML, per the
+  credentials-vs-plain-config split (§4.2). `run()` has the same
+  testability-hook shape as mqtt-ingest/tcp-poller
+  (`ingest_api_url`/`token`/`wal_path`/`batch_size`/`batch_interval`/
+  `reconnect_delay`/`stop_event` overrides).
 - `services/common/meshdb_common/regions.py` also has
   `build_subscribe_topic_filters()`, returning `(topic_filter, region)`
   pairs — `build_subscribe_topics()` is now a thin wrapper over it that
   drops the region half, kept for callers that don't need the pairing.
 - Config: `.env.sample`, `config/regions.yaml.sample`, `secrets/*.sample` —
   copy each to its real (gitignored) filename to configure a deployment.
+  `secrets/ingest_api_token.txt.sample`/`INGEST_API_TOKEN` in `.env.sample`
+  are now actually consumed: by `docker-compose.yml`'s `ingest-api` service
+  (as `INGEST_API_TOKEN_FILE`) and by `docker-compose.gateway-agent.yml`'s
+  `gateway-agent` service the same way — both sides of the same bearer
+  token need to be copied from the same value for a real deployment.
+  `services/gateway-agent/config.example.yaml` is the per-agent-instance
+  config (region, connection, ingest-api URL, WAL path) — copied to a
+  plain `config.yaml` alongside wherever `docker-compose.gateway-agent.yml`
+  runs, not part of `config/regions.yaml`.
 - Vendored protobufs: `vendor/protobufs` (git submodule, pinned commit
   below) + generated code (checked in, from `make proto-gen`) in
   `services/common/meshdb_common/generated/meshtastic/`. `import meshtastic.*`
@@ -162,10 +247,16 @@ are still empty placeholders (`.gitkeep`).
   defines the installable `meshdb-common` package (deps: `protobuf`,
   `cryptography`, `PyYAML`, `psycopg[binary]>=3.1,<4`); root
   `requirements-dev.txt` adds `pytest`, `grpcio-tools` (for `make
-  proto-gen`), `ruff`, `testcontainers` (for the `db.py` integration test
-  only). `ruff.toml` excludes `**/generated/` from lint (protoc output, not
-  hand-written). Set up with `python3 -m venv .venv && .venv/bin/pip install
-  -r requirements-dev.txt`.
+  proto-gen`), `ruff`, `testcontainers` (for the `db.py` integration test),
+  `paho-mqtt` (mqtt-ingest), and `fastapi`/`httpx` (ingest-api's
+  `TestClient`), `requests`/`pyserial`/`bleak` (gateway-agent) so every
+  service's `main.py` is importable from the test venv, not just its own
+  container image. `ruff.toml` excludes `**/generated/` from lint (protoc
+  output, not hand-written) and sets `flake8-bugbear.extend-immutable-calls
+  = ["fastapi.Depends"]` (FastAPI's own required idiom is a function call
+  as an argument default, which bugbear's B008 would otherwise flag as the
+  mutable-default-argument bug). Set up with `python3 -m venv .venv &&
+  .venv/bin/pip install -r requirements-dev.txt`.
 - Test configuration: root `pytest.ini` registers an `integration` marker
   and sets `addopts = -m "not integration"`, so `pytest tests/`/`make test`
   runs only the fast, Docker-free unit tests by default. Run the
@@ -215,17 +306,57 @@ are still empty placeholders (`.gitkeep`).
     machine (frame split across chunks, multiple frames in one chunk,
     resync past garbage bytes, oversized-length rejection) — fast, no
     Docker needed.
+  - `tests/test_serialization.py` round-trips `DecodedPacketEnvelope`
+    through `envelope_to_dict()`/`envelope_from_dict()` for all four
+    envelope shapes (fields, position, identity, UNDECRYPTABLE) — fast, no
+    Docker needed.
+  - `tests/test_ingest_api.py` loads `services/ingest-api/main.py` the same
+    `importlib` way and uses FastAPI's `TestClient` against
+    `create_app(conn=..., cfg=...)` for auth/region-filtering/malformed-body
+    cases with a fake connection (fast, no Docker); one `integration`-marked
+    case uses the real `ingest_dsn` fixture to prove the whole HTTP ->
+    `write_envelopes()` -> Postgres path, not just that the pieces are wired
+    together.
+  - `tests/test_gateway_agent_wal.py`, `tests/test_gateway_agent_decode.py`,
+    and `tests/test_gateway_agent_http_sender.py` load
+    `services/gateway-agent/main.py` the same `importlib` way — with one
+    addition the other services' main.py files don't need:
+    `sys.modules[spec.name] = module` before `exec_module()`, because this
+    module (unlike mqtt-ingest's/tcp-poller's) defines its own `@dataclass`
+    classes, and Python's dataclass processing looks the defining module up
+    in `sys.modules` by name — without that registration step it raises
+    `AttributeError` on a `NoneType`. None of these three need Docker:
+    `test_gateway_agent_wal.py` exercises `Wal` append/replay/clear/
+    torn-line-skip directly; `test_gateway_agent_decode.py` exercises
+    `handle_from_radio_bytes()`/`HttpEnvelopeBatcher` against synthetic
+    `FromRadio` bytes with a fake sender, proving the decode/batch wiring
+    without a real transport; `test_gateway_agent_http_sender.py` runs
+    `IngestApiSender` against a real local `http.server` (not a mock of the
+    `requests` library) to prove both the plain forwarding path and — the
+    phase's own stated acceptance criterion — that WAL spillover survives
+    an actual ingest-api restart mid-stream (the test really does shut one
+    fake server down and bind a second one to the same port, not just
+    toggle a failure flag). The transport layer itself (serial/BLE
+    connection handling) has no test — matching the design's own §10.7
+    hedge that it isn't fully mockable in CI; BLE in particular has not
+    been run against real hardware at all (see `services/gateway-agent/
+    main.py`'s module docstring).
 
 ## Facts that must stay in sync with this file
 
 - Vendored protobufs commit: `723a31e` (`meshtastic/protobufs`, submodule
   HEAD as of the initial scaffold — update this line whenever the
   submodule pointer moves).
-- Pinned `meshtastic` PyPI version: not yet pinned. `tcp-poller` doesn't
-  need it (§ "Where things live" above) — only `gateway-agent`'s BLE/serial
-  transport is expected to need it, once that phase's interception spike
-  resolves how to grab raw payload bytes before the library's own bundled
-  protobuf classes touch them.
+- The `meshtastic` PyPI package is not, and will not be, a dependency of
+  any service in this repo. `tcp-poller` never needed it: TCP framing is
+  simple and fully documented. `gateway-agent` was expected to need it for
+  BLE/serial (per the design's original plan), but its own
+  transport-interception spike concluded the opposite — see
+  `services/gateway-agent/main.py`'s module docstring for the full
+  reasoning (short version: that package's bundled protobuf classes would
+  silently shadow this repo's own generated ones via a Python import-path
+  collision). If a future change ever considers adding it as a dependency
+  of any service, re-read that docstring first.
 - `tcp-poller` env vars (all optional, sensible defaults): `TCP_POLLER_PORT`
   (default 4403, the Meshtastic local-API TCP port), `TCP_POLLER_BATCH_SIZE`
   (default 50), `TCP_POLLER_BATCH_INTERVAL_SECONDS` (default 2),
@@ -272,9 +403,15 @@ are still empty placeholders (`.gitkeep`).
   port, `profiles: ["extra-sources"]` — needs `docker compose --profile
   extra-sources up` or an explicit service name, since an empty
   `tcp_nodes: []` is the common case and there's nothing useful for it to do
-  by default). `ingest-api` still needs the `extra-sources` profile added
-  when it's built. `mqtt-ingest` needs `MQTT_HOST` passed through to its
-  container environment (in addition to `MQTT_USERNAME`/
+  by default), `ingest-api` (built locally from
+  `services/ingest-api/Dockerfile`, host port `8000`, also `profiles:
+  ["extra-sources"]` — only needed once a remote gateway-agent exists).
+  `docker-compose.gateway-agent.yml` is a separate standalone compose file
+  (not merged into the main one) for a remote host with radio access —
+  builds the same `services/gateway-agent/Dockerfile` against this same
+  repo checkout, so deploying it means cloning this repo onto that host
+  too, not just copying one file. `mqtt-ingest` needs `MQTT_HOST` passed
+  through to its container environment (in addition to `MQTT_USERNAME`/
   `MQTT_PASSWORD_FILE`/`INGEST_DB_PASSWORD`) because `config/regions.yaml`'s
   `${MQTT_HOST}` is expanded by `load_regions_config()` against the
   *container's* environment, not the host's `.env` — `os.path.expandvars`
@@ -294,7 +431,10 @@ are still empty placeholders (`.gitkeep`).
   `db/init/50_roles.sh` with passwords from `INGEST_DB_PASSWORD` /
   `GRAFANA_DB_PASSWORD`. `db.py`'s `write_envelopes()` only ever needs
   `ingest_rw`'s grants (INSERT + the UPDATE that `ON CONFLICT ... DO
-  UPDATE` needs for `node_identity`). Neither role is yet wired into an
+  UPDATE` needs for `node_identity`). `ingest-api` is the only service that
+  connects as `ingest_rw` on behalf of another process (gateway-agent
+  itself has no DB access at all) rather than for its own directly-decoded
+  traffic. Neither role is yet wired into an
   ingestion service's connection string — `db.py` takes a connection the
   caller already opened, so that wiring happens as each ingestion/
   Grafana-provisioning phase lands, not here.
@@ -373,7 +513,16 @@ are still empty placeholders (`.gitkeep`).
   `make up`) — `timescaledb`, `grafana`, and `mqtt-ingest` start by default;
   `tcp-poller` needs `docker compose --profile extra-sources up -d` (or
   naming it explicitly) plus at least one `tcp_nodes` entry in
-  `config/regions.yaml` to have anything to do.
+  `config/regions.yaml` to have anything to do; `ingest-api` needs the same
+  `--profile extra-sources` (or naming it explicitly) and is only useful
+  once a remote `gateway-agent` exists to POST to it. A `gateway-agent`
+  instance runs separately, on whatever host has the physical radio: `cp
+  services/gateway-agent/config.example.yaml config.yaml` (edit `region`,
+  `connection`, `ingest_api.url`), `cp secrets/ingest_api_token.txt.sample
+  secrets/ingest_api_token.txt` (matching the value the central
+  `ingest-api` instance was actually started with), then `docker compose -f
+  docker-compose.gateway-agent.yml up -d` from a checkout of this same repo
+  on that host.
 - Python dev/test setup (for `meshdb_common` and the services, independent
   of the above): `python3 -m venv .venv && .venv/bin/pip install -r
   requirements-dev.txt`, then `.venv/bin/pytest tests/` or `.venv/bin/ruff
@@ -382,9 +531,9 @@ are still empty placeholders (`.gitkeep`).
   `vendor/protobufs` submodule checked out. `make test-integration` needs
   Docker (colima on macOS — see the Ryuk/colima note above) and runs every
   `integration`-marked test (currently `test_db_write_path.py`,
-  `test_mqtt_ingest_replay.py`, and `test_tcp_poller_replay.py`, sharing one
-  Postgres container via the `ingest_dsn` fixture) separately from `make
-  test`.
+  `test_mqtt_ingest_replay.py`, `test_tcp_poller_replay.py`, and one case in
+  `test_ingest_api.py`, sharing one Postgres container via the `ingest_dsn`
+  fixture) separately from `make test`.
 - Retention/rollup changes need an explicit `make retune-retention` run,
   not a config reload — `docker-entrypoint-initdb.d` only runs once,
   against an empty volume, so editing `.env` after first init has no

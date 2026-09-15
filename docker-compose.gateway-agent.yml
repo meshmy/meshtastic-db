@@ -1,0 +1,38 @@
+# Standalone compose file for a remote host with physical BLE/serial access
+# to a radio (e.g. a Raspberry Pi) — not part of the main docker-compose.yml
+# stack. Deploy by checking out this repo on that host (the build context
+# below needs services/common alongside services/gateway-agent) and running:
+#
+#   cp services/gateway-agent/config.example.yaml config.yaml   # edit region/connection/ingest_api.url
+#   cp secrets/ingest_api_token.txt.sample secrets/ingest_api_token.txt  # set to the real ingest-api token
+#   docker compose -f docker-compose.gateway-agent.yml up -d
+#
+# Serial needs the device mount below. BLE typically needs host networking
+# plus a D-Bus mount for BlueZ instead — flagged as finicky (§5); running
+# the agent directly on host Python (`pip install -e services/common && pip
+# install -r services/gateway-agent/requirements.txt && python
+# services/gateway-agent/main.py`) is the documented fallback if BLE under
+# Docker doesn't cooperate on a given host.
+services:
+  gateway-agent:
+    build:
+      context: .
+      dockerfile: services/gateway-agent/Dockerfile
+    restart: unless-stopped
+    environment:
+      GATEWAY_AGENT_CONFIG_PATH: /config/config.yaml
+      INGEST_API_TOKEN_FILE: /run/secrets/ingest_api_token
+    volumes:
+      - ./config.yaml:/config/config.yaml:ro
+      - gateway_agent_wal:/var/lib/gateway-agent
+    devices:
+      - /dev/ttyUSB0:/dev/ttyUSB0
+    secrets:
+      - ingest_api_token
+
+volumes:
+  gateway_agent_wal:
+
+secrets:
+  ingest_api_token:
+    file: ./secrets/ingest_api_token.txt

@@ -67,6 +67,28 @@ services:
     volumes:
       - ./config/regions.yaml:/config/regions.yaml:ro
 
+  ingest-api:
+    build:
+      context: .
+      dockerfile: services/ingest-api/Dockerfile
+    restart: unless-stopped
+    profiles: ["extra-sources"]
+    depends_on:
+      - timescaledb
+    environment:
+      INGEST_DB_HOST: timescaledb
+      INGEST_DB_PORT: 5432
+      INGEST_DB_NAME: meshtastic
+      INGEST_DB_PASSWORD: ${INGEST_DB_PASSWORD}
+      REGIONS_CONFIG_PATH: /config/regions.yaml
+      INGEST_API_TOKEN_FILE: /run/secrets/ingest_api_token
+    volumes:
+      - ./config/regions.yaml:/config/regions.yaml:ro
+    ports:
+      - "8000:8000"
+    secrets:
+      - ingest_api_token
+
 volumes:
   timescaledb_data:
   grafana_data:
@@ -74,3 +96,5 @@ volumes:
 secrets:
   mqtt_password:
     file: ./secrets/mqtt_password.txt
+  ingest_api_token:
+    file: ./secrets/ingest_api_token.txt
