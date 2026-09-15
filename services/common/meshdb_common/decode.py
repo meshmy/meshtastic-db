@@ -234,22 +234,28 @@ def decode_data(data: mesh_pb2.Data, **common_kwargs) -> DecodedPacketEnvelope:
     return DecodedPacketEnvelope(packet_type=packet_type, portnum=portnum, fields=tuple(walk_message(msg)), **common_kwargs)
 
 
-def decode_service_envelope(
-    raw: bytes,
+def decode_mesh_packet(
+    packet: mesh_pb2.MeshPacket,
     *,
     region: str,
     source: str,
     channel_psks: dict[str, bytes],
+    gateway_node_id: int | None = None,
+    channel_id: str | None = None,
 ) -> DecodedPacketEnvelope:
-    """Parse a raw ServiceEnvelope, decrypt its payload if needed, and
-    dispatch by portnum. Returns an envelope with packet_type
-    'UNDECRYPTABLE' (transport metadata only, no fields/position/identity)
-    when the payload is encrypted and no matching channel PSK is
-    configured, or decryption/parsing fails."""
-    envelope = mqtt_pb2.ServiceEnvelope()
-    envelope.ParseFromString(raw)
-    packet = envelope.packet
+    """Decode one already-received MeshPacket (plaintext or still
+    encrypted) and dispatch by portnum. Shared by every transport:
+    `decode_service_envelope` (MQTT) unwraps a ServiceEnvelope first, which
+    carries an explicit `channel_id`; a local TCP/BLE/serial API connection
+    hands over a bare MeshPacket already decrypted by the node itself, with
+    no channel_id of its own, so `channel_id=None` falls straight to
+    `WILDCARD_CHANNEL` for the (rare) case where the local node still
+    forwards a payload it couldn't decrypt.
 
+    Returns an envelope with packet_type 'UNDECRYPTABLE' (transport
+    metadata only, no fields/position/identity) when the payload is
+    encrypted and no matching channel PSK is configured, or
+    decryption/parsing fails."""
     from_node = getattr(packet, "from")
     rx_time = (
         datetime.fromtimestamp(packet.rx_time, tz=timezone.utc)
@@ -261,7 +267,7 @@ def decode_service_envelope(
         "node_id": from_node,
         "region": region,
         "source": source,
-        "gateway_node_id": parse_node_id(envelope.gateway_id),
+        "gateway_node_id": gateway_node_id,
         "packet_id": packet.id,
         "snr": packet.rx_snr,
         "rssi": packet.rx_rssi if packet.HasField("rx_rssi") else None,
@@ -283,7 +289,7 @@ def decode_service_envelope(
         # parse as a valid Data message (caught below as UNDECRYPTABLE),
         # since there's no way to tell "uses the default key" and "uses an
         # unknown custom key" apart from channel_id alone.
-        psk = channel_psks.get(envelope.channel_id, channel_psks.get(WILDCARD_CHANNEL))
+        psk = channel_psks.get(channel_id, channel_psks.get(WILDCARD_CHANNEL))
         if psk is None:
             return DecodedPacketEnvelope(packet_type="UNDECRYPTABLE", portnum=None, **common_kwargs)
         try:
@@ -296,3 +302,24 @@ def decode_service_envelope(
         data = packet.decoded
 
     return decode_data(data, **common_kwargs)
+
+
+def decode_service_envelope(
+    raw: bytes,
+    *,
+    region: str,
+    source: str,
+    channel_psks: dict[str, bytes],
+) -> DecodedPacketEnvelope:
+    """Parse a raw ServiceEnvelope and decode its wrapped MeshPacket via
+    `decode_mesh_packet`."""
+    envelope = mqtt_pb2.ServiceEnvelope()
+    envelope.ParseFromString(raw)
+    return decode_mesh_packet(
+        envelope.packet,
+        region=region,
+        source=source,
+        channel_psks=channel_psks,
+        gateway_node_id=parse_node_id(envelope.gateway_id),
+        channel_id=envelope.channel_id,
+    )

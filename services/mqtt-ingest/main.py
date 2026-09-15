@@ -14,20 +14,18 @@ from __future__ import annotations
 import logging
 import os
 import threading
-import time
-from collections import Counter
 from pathlib import Path
 
 import psycopg
+from meshdb_common.batching import EnvelopeBatcher
 from meshdb_common.config import (
     MqttBroker,
     RegionsConfig,
     load_regions_config,
     resolve_secret,
 )
-from meshdb_common.db import write_envelopes
+from meshdb_common.connect import build_ingest_dsn, connect_with_retry
 from meshdb_common.decode import decode_service_envelope
-from meshdb_common.envelope import DecodedPacketEnvelope
 from meshdb_common.regions import (
     build_channel_psks,
     build_subscribe_topic_filters,
@@ -50,47 +48,6 @@ def resolve_region_for_topic(topic: str, topic_filters: list[tuple[str, str]]) -
     return None
 
 
-class EnvelopeBatcher:
-    """Buffers decoded envelopes and flushes them to Postgres via
-    write_envelopes() once `batch_size` is reached or `batch_interval`
-    seconds have passed since the oldest buffered envelope — bounds both
-    memory and worst-case write latency. Thread-safe: `add()` runs on
-    paho-mqtt's network thread, `flush_if_due()` is polled from the main
-    thread."""
-
-    def __init__(self, conn: psycopg.Connection, *, batch_size: int, batch_interval: float) -> None:
-        self._conn = conn
-        self._batch_size = batch_size
-        self._batch_interval = batch_interval
-        self._lock = threading.Lock()
-        self._buffer: list[DecodedPacketEnvelope] = []
-        self._oldest_at: float | None = None
-
-    def add(self, envelope: DecodedPacketEnvelope) -> None:
-        with self._lock:
-            self._buffer.append(envelope)
-            if self._oldest_at is None:
-                self._oldest_at = time.monotonic()
-            should_flush = len(self._buffer) >= self._batch_size
-        if should_flush:
-            self.flush()
-
-    def flush_if_due(self) -> None:
-        with self._lock:
-            due = self._oldest_at is not None and (time.monotonic() - self._oldest_at) >= self._batch_interval
-        if due:
-            self.flush()
-
-    def flush(self) -> None:
-        with self._lock:
-            batch, self._buffer = self._buffer, []
-            self._oldest_at = None
-        if batch:
-            write_envelopes(self._conn, batch)
-            by_packet_type = dict(Counter(env.packet_type for env in batch))
-            logger.info("wrote batch of %d envelope(s): %s", len(batch), by_packet_type)
-
-
 def handle_message(
     msg: MQTTMessage,
     *,
@@ -111,29 +68,6 @@ def handle_message(
         logger.exception("failed to decode message on topic %r", msg.topic)
         return
     batcher.add(envelope)
-
-
-def build_ingest_dsn() -> str:
-    host = os.environ.get("INGEST_DB_HOST", "timescaledb")
-    port = os.environ.get("INGEST_DB_PORT", "5432")
-    dbname = os.environ.get("INGEST_DB_NAME", "meshtastic")
-    password = resolve_secret("INGEST_DB_PASSWORD")
-    return f"host={host} port={port} dbname={dbname} user=ingest_rw password={password}"
-
-
-def connect_with_retry(dsn: str, *, timeout: float = 60.0) -> psycopg.Connection:
-    """Container start order isn't the same as "ready to accept
-    connections" — retry rather than crash-loop while Postgres finishes
-    initializing."""
-    deadline = time.monotonic() + timeout
-    last_error: Exception | None = None
-    while time.monotonic() < deadline:
-        try:
-            return psycopg.connect(dsn)
-        except psycopg.OperationalError as exc:
-            last_error = exc
-            time.sleep(1)
-    raise TimeoutError(f"could not connect to {dsn!r} within {timeout}s") from last_error
 
 
 def build_mqtt_client(broker: MqttBroker, *, client_id: str, on_message, on_connect) -> Client:
