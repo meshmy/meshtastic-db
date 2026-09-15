@@ -1,7 +1,7 @@
 .PHONY: up down proto-gen test test-integration lint retune-retention
 
 up:
-	docker compose up -d timescaledb grafana
+	docker compose up -d
 
 down:
 	docker compose down

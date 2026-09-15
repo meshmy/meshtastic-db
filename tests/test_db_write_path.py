@@ -8,9 +8,7 @@ grants that db/init/50_roles.sh actually creates, not just the SQL."""
 
 from __future__ import annotations
 
-import time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import psycopg
 import pytest
@@ -21,48 +19,8 @@ from meshdb_common.envelope import (
     NodeIdentityUpdate,
     PositionFix,
 )
-from testcontainers.core.container import DockerContainer
 
 pytestmark = pytest.mark.integration
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-INGEST_DB_PASSWORD = "test-ingest-password"
-
-
-def _wait_until_ready(dsn: str, timeout: float = 90.0) -> None:
-    deadline = time.monotonic() + timeout
-    last_error: Exception | None = None
-    while time.monotonic() < deadline:
-        try:
-            with psycopg.connect(dsn, connect_timeout=2) as conn:
-                conn.execute("SELECT 1 FROM node_identity")
-            return
-        except psycopg.OperationalError as exc:
-            last_error = exc
-            time.sleep(1)
-    raise TimeoutError(f"timescaledb test container never became ready: {last_error}")
-
-
-@pytest.fixture(scope="module")
-def ingest_dsn():
-    container = (
-        DockerContainer("timescale/timescaledb-ha:pg16")
-        .with_env("POSTGRES_PASSWORD", "test-superuser-password")
-        .with_env("POSTGRES_DB", "meshtastic")
-        .with_env("RAW_COMPRESS_AFTER", "10 days")
-        .with_env("HOURLY_COMPRESS_AFTER", "30 days")
-        .with_env("DAILY_COMPRESS_AFTER", "90 days")
-        .with_env("INGEST_DB_PASSWORD", INGEST_DB_PASSWORD)
-        .with_env("GRAFANA_DB_PASSWORD", "test-grafana-password")
-        .with_volume_mapping(str(REPO_ROOT / "db" / "init"), "/docker-entrypoint-initdb.d", "ro")
-        .with_exposed_ports(5432)
-    )
-    with container:
-        host = container.get_container_host_ip()
-        port = container.get_exposed_port(5432)
-        superuser_dsn = f"host={host} port={port} dbname=meshtastic user=postgres password=test-superuser-password"
-        _wait_until_ready(superuser_dsn)
-        yield f"host={host} port={port} dbname=meshtastic user=ingest_rw password={INGEST_DB_PASSWORD}"
 
 
 @pytest.fixture

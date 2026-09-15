@@ -8,15 +8,25 @@ from .config import RegionsConfig
 from .decode import resolve_psk
 
 
-def build_subscribe_topics(cfg: RegionsConfig) -> list[str]:
-    """One subscription per allowed region, covering both the current ('e')
-    and legacy ('c') topic versions — the opt-in is enforced at the
-    subscription itself, not via a wildcard-then-filter."""
+def build_subscribe_topic_filters(cfg: RegionsConfig) -> list[tuple[str, str]]:
+    """One (topic filter, region) pair per allowed region, covering both the
+    current ('e') and legacy ('c') topic versions — the opt-in is enforced
+    at the subscription itself, not via a wildcard-then-filter. Paired with
+    its region so a message handler can recover which allowed region an
+    incoming topic matched via MQTT wildcard matching, without re-parsing
+    topic_template against the concrete topic (ambiguous in general once
+    `#`/`+` are involved)."""
     return [
-        cfg.mqtt.topic_template.format(region=region, version=version)
+        (cfg.mqtt.topic_template.format(region=region, version=version), region)
         for region in cfg.allowed_regions
         for version in ("e", "c")
     ]
+
+
+def build_subscribe_topics(cfg: RegionsConfig) -> list[str]:
+    """Just the topic filters from build_subscribe_topic_filters, for a
+    caller that doesn't need the region pairing."""
+    return [topic for topic, _ in build_subscribe_topic_filters(cfg)]
 
 
 def is_region_allowed(region: str, cfg: RegionsConfig) -> bool:

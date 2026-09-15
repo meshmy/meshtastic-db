@@ -14,20 +14,20 @@ Grafana as the primary visualization layer. This file documents current,
 verifiable facts about the running system — not the full design rationale
 or sizing math behind each decision.
 
-**Current status: the schema, decode library, and shared write path are all
-built.** The directory layout, config templates, a two-service
-`docker-compose.yml` (`timescaledb` + `grafana`), the full
-TimescaleDB/PostGIS schema (`db/init/*`), `services/common/meshdb_common`'s
+**Current status: the schema, decode library, shared write path, and the
+mqtt-ingest service are all built.** The directory layout, config templates,
+the TimescaleDB/PostGIS schema (`db/init/*`), `services/common/meshdb_common`'s
 decode side (protobuf codegen, reflection-based decode, PortNum dispatch,
-MQTT decrypt, region config loading), and its write side (`db.py` — batched
-insert, dedup, as-of position join, identity upsert) all exist and are
-covered by a passing test suite (unit tests plus one Docker-backed
-integration suite, see below). No ingestion service or archive job exists
-yet — `services/mqtt-ingest`, `services/tcp-poller`, `services/gateway-agent`,
-`services/ingest-api`, `services/archive-job`, and `grafana/provisioning/*`
-are still empty placeholders (`.gitkeep`). Nothing is being ingested from
-the configured MQTT broker yet — `.env`/`config/regions.yaml` point at one,
-but no service subscribes to it until mqtt-ingest is built.
+MQTT decrypt, region config loading), its write side (`db.py` — batched
+insert, dedup, as-of position join, identity upsert), and `services/mqtt-ingest`
+(the central MQTT subscriber — see below) all exist and are covered by a
+passing test suite (unit tests plus Docker-backed integration suites, see
+below). `docker-compose.yml` now has three services: `timescaledb`,
+`grafana`, `mqtt-ingest` (built from `services/mqtt-ingest/Dockerfile`, no
+`profiles:` — starts by default with a plain `docker compose up`).
+`services/tcp-poller`, `services/gateway-agent`, `services/ingest-api`,
+`services/archive-job`, and `grafana/provisioning/*` are still empty
+placeholders (`.gitkeep`).
 
 ## Where things live
 
@@ -77,6 +77,31 @@ but no service subscribes to it until mqtt-ingest is built.
   batch is already visible to that join for a later envelope in the same
   batch. All three inserts use `unnest()` over parallel Python lists (one
   round trip per batch per table), not one round trip per row.
+- `services/mqtt-ingest/main.py` — the central MQTT subscriber:
+  `run(config_path, ...)` loads `config/regions.yaml`, subscribes one
+  paho-mqtt client per configured broker to
+  `regions.build_subscribe_topic_filters()`'s filters, and on every message
+  resolves which allowed region the topic matched via MQTT wildcard
+  matching (`paho.mqtt.client.topic_matches_sub`, not by re-parsing
+  `topic_template` against the concrete topic — ambiguous in general once
+  `#`/`+` are involved), decodes via `decode_service_envelope()`, and hands
+  the result to an `EnvelopeBatcher` that flushes to `write_envelopes()`
+  once `MQTT_INGEST_BATCH_SIZE` (default 50) envelopes are buffered or
+  `MQTT_INGEST_BATCH_INTERVAL_SECONDS` (default 2) has elapsed since the
+  oldest one — whichever comes first. `run()` takes optional `conn`,
+  `batch_size`, `batch_interval`, and `stop_event` overrides specifically so
+  tests can drive it directly instead of only through the container
+  entrypoint. DB connection retries for up to 60s
+  (`connect_with_retry()`) since container start order isn't the same as
+  "ready to accept connections". Credentials: `MQTT_USERNAME`/
+  `MQTT_PASSWORD` (or `MQTT_PASSWORD_FILE`, the Compose-secret convention)
+  and `INGEST_DB_PASSWORD`; `INGEST_DB_HOST`/`PORT`/`NAME` default to
+  `timescaledb`/`5432`/`meshtastic` (the values that match
+  `docker-compose.yml`).
+- `services/common/meshdb_common/regions.py` also has
+  `build_subscribe_topic_filters()`, returning `(topic_filter, region)`
+  pairs — `build_subscribe_topics()` is now a thin wrapper over it that
+  drops the region half, kept for callers that don't need the pairing.
 - Config: `.env.sample`, `config/regions.yaml.sample`, `secrets/*.sample` —
   copy each to its real (gitignored) filename to configure a deployment.
 - Vendored protobufs: `vendor/protobufs` (git submodule, pinned commit
@@ -96,16 +121,41 @@ but no service subscribes to it until mqtt-ingest is built.
   -r requirements-dev.txt`.
 - Test configuration: root `pytest.ini` registers an `integration` marker
   and sets `addopts = -m "not integration"`, so `pytest tests/`/`make test`
-  runs only the fast, Docker-free unit tests by default.
-  `tests/test_db_write_path.py` is the one test module marked
-  `integration` — it spins up a real, disposable
-  `timescale/timescaledb-ha:pg16` container running the actual
-  `db/init/*` scripts (via `testcontainers`' generic `DockerContainer`,
-  not the `testcontainers.postgres` module, so it can mount `db/init` at
-  `/docker-entrypoint-initdb.d` exactly like `docker-compose.yml` does),
-  connects as `ingest_rw` (not the superuser, so the test also exercises
-  `50_roles.sh`'s actual grants), and exercises `write_envelopes()`
-  end-to-end. Run it with `make test-integration`.
+  runs only the fast, Docker-free unit tests by default. Run the
+  `integration`-marked tests with `make test-integration`.
+  `tests/conftest.py` holds the shared Docker-backed fixtures:
+  - `ingest_dsn` (session-scoped): a real, disposable
+    `timescale/timescaledb-ha:pg16` container running the actual
+    `db/init/*` scripts (via `testcontainers`' generic `DockerContainer`,
+    not the `testcontainers.postgres` module, so it can mount `db/init` at
+    `/docker-entrypoint-initdb.d` exactly like `docker-compose.yml` does),
+    exposing a DSN that connects as `ingest_rw` (not the superuser, so any
+    test using it also exercises `50_roles.sh`'s actual grants). One
+    container is shared across every integration test module in a run;
+    tests stay isolated from each other by using disjoint `node_id`s
+    rather than by resetting the database between tests (`ingest_rw` has
+    no TRUNCATE/DELETE grant anyway).
+  - `mosquitto_broker` (session-scoped): a real, disposable
+    `eclipse-mosquitto:2` container (anonymous access enabled) for tests
+    that need actual MQTT wire traffic. Its bind-mounted conf dir is
+    created under the repo tree (`.mqtt-ingest-test-*/`, gitignored), not
+    the system tempdir — on macOS via colima, Docker only sees paths under
+    the colima VM's mounted directories (the user's home directory by
+    default), and `/tmp`/`/var/folders/...` aren't among them, so a
+    tempdir-based bind mount silently mounts nothing and mosquitto fails
+    to find its config.
+  - `tests/test_db_write_path.py` uses `ingest_dsn` to exercise
+    `write_envelopes()` directly.
+  - `tests/test_mqtt_ingest_replay.py` (§10.3's "MQTT corpus replay") uses
+    both fixtures together: it loads `services/mqtt-ingest/main.py` via
+    `importlib` (its directory has a hyphen, so it isn't a plain importable
+    package), runs its `run()` in a background thread against the real
+    Postgres container with a `stop_event`, publishes synthesized
+    `ServiceEnvelope` bytes (plaintext and default-PSK-encrypted) to the
+    real mosquitto broker on topics shaped like real Meshtastic MQTT
+    traffic, and polls Postgres for the expected `metric` rows — the first
+    test to exercise the actual MQTT subscribe path over real wire
+    traffic, not just `decode_service_envelope()` called directly.
 
 ## Facts that must stay in sync with this file
 
@@ -132,8 +182,22 @@ but no service subscribes to it until mqtt-ingest is built.
   to check.
 - Compose services defined so far: `timescaledb` (`timescale/timescaledb-ha:pg16`,
   host port `5432`), `grafana` (`grafana/grafana:11.3.0-ubuntu`, host port
-  `3000`). No `profiles:` exist yet — `tcp-poller`/`ingest-api` and their
-  `extra-sources` profile are added when those services are built.
+  `3000`), `mqtt-ingest` (built locally from `services/mqtt-ingest/Dockerfile`,
+  no host port — outbound-only). No `profiles:` exist yet — `tcp-poller`/
+  `ingest-api` and their `extra-sources` profile are added when those
+  services are built. `mqtt-ingest` needs `MQTT_HOST` passed through to its
+  container environment (in addition to `MQTT_USERNAME`/
+  `MQTT_PASSWORD_FILE`/`INGEST_DB_PASSWORD`) because `config/regions.yaml`'s
+  `${MQTT_HOST}` is expanded by `load_regions_config()` against the
+  *container's* environment, not the host's `.env` — `os.path.expandvars`
+  silently leaves an unset reference as the literal string
+  `${MQTT_HOST}` rather than erroring, which surfaces downstream as a DNS
+  resolution failure on that literal string if the env var is missing from
+  a service definition. Caught by actually running `docker compose up
+  mqtt-ingest` against a real broker, not by the test suite (the
+  corpus-replay test supplies the broker host directly, with no
+  `${VAR}` indirection) — worth remembering if a future ingestion service
+  reads `regions.yaml` fields that reference other `${VAR}`s.
 - DB roles: `ingest_rw` (INSERT/SELECT/UPDATE on `metric`,
   `node_position_history`, `node_identity`, `archive_manifest` — no
   DELETE/TRUNCATE, confirmed by the integration test above) and
@@ -190,10 +254,12 @@ but no service subscribes to it until mqtt-ingest is built.
   on `metric` and `node_position_history` — any PostGIS-aware client
   (QGIS, `ogr2ogr`, DuckDB spatial) can connect directly; no bespoke API
   is required for read access.
-- No data has been ingested yet — schema only. Verified manually (insert +
-  `refresh_continuous_aggregate` + query on both `metric_hourly` and
-  `metric_daily`); no persistent test data was left behind
-  (`docker compose down -v timescaledb` after verification).
+- The schema itself was verified manually before any ingestion service
+  existed (insert + `refresh_continuous_aggregate` + query on both
+  `metric_hourly` and `metric_daily`); no persistent test data was left
+  behind (`docker compose down -v timescaledb` after verification).
+  `mqtt-ingest` can now populate real data from a configured broker, but
+  whether it has actually run against one depends on the deployment.
 
 ## Extension points (general — not tied to any one future feature)
 
@@ -214,15 +280,19 @@ but no service subscribes to it until mqtt-ingest is built.
 
 - Local dev setup: `cp .env.sample .env`, `cp config/regions.yaml.sample
   config/regions.yaml`, `cp secrets/*.sample` to their non-`.sample` names,
-  then `docker compose up -d timescaledb grafana` (or `make up`).
-- Python dev/test setup (for `meshdb_common`, independent of the above):
-  `python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt`,
-  then `.venv/bin/pytest tests/` or `.venv/bin/ruff check services/ tests/`
-  (or `make test`/`make lint` with the venv active). `make proto-gen` needs
-  the same venv (`grpcio-tools`) and the `vendor/protobufs` submodule
-  checked out. `make test-integration` needs Docker (colima on macOS — see
-  the Ryuk/colima note above) and runs the one `db.py` integration test
-  separately from `make test`.
+  edit `allowed_regions` and `MQTT_HOST`, then `docker compose up -d` (or
+  `make up`) — `timescaledb`, `grafana`, and `mqtt-ingest` all start by
+  default (no `profiles:` gate any of them yet).
+- Python dev/test setup (for `meshdb_common` and the services, independent
+  of the above): `python3 -m venv .venv && .venv/bin/pip install -r
+  requirements-dev.txt`, then `.venv/bin/pytest tests/` or `.venv/bin/ruff
+  check services/ tests/` (or `make test`/`make lint` with the venv
+  active). `make proto-gen` needs the same venv (`grpcio-tools`) and the
+  `vendor/protobufs` submodule checked out. `make test-integration` needs
+  Docker (colima on macOS — see the Ryuk/colima note above) and runs every
+  `integration`-marked test (currently `test_db_write_path.py` and
+  `test_mqtt_ingest_replay.py`, sharing one Postgres container via the
+  `ingest_dsn` fixture) separately from `make test`.
 - Retention/rollup changes need an explicit `make retune-retention` run,
   not a config reload — `docker-entrypoint-initdb.d` only runs once,
   against an empty volume, so editing `.env` after first init has no
