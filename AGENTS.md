@@ -14,10 +14,10 @@ Grafana as the primary visualization layer. This file documents current,
 verifiable facts about the running system — not the full design rationale
 or sizing math behind each decision.
 
-**Current status: the schema, decode library, shared write path, and all
-four ingestion services (mqtt-ingest, tcp-poller, ingest-api,
-gateway-agent) are built.** The directory layout, config templates, the
-TimescaleDB/PostGIS schema (`db/init/*`), `services/common/meshdb_common`'s
+**Current status: the schema, decode library, shared write path, all four
+ingestion services (mqtt-ingest, tcp-poller, ingest-api, gateway-agent),
+and the archive job are built.** The directory layout, config templates,
+the TimescaleDB/PostGIS schema (`db/init/*`), `services/common/meshdb_common`'s
 decode side (protobuf codegen, reflection-based decode, PortNum dispatch,
 MQTT decrypt, region config loading), its write side (`db.py` — batched
 insert, dedup, as-of position join, identity upsert), its shared
@@ -25,16 +25,17 @@ ingestion-service plumbing (`batching.py`, `connect.py`,
 `stream_framing.py`, `serialization.py` — see below), `services/mqtt-ingest`
 (the central MQTT subscriber), `services/tcp-poller` (the central TCP
 poller), `services/ingest-api` (the HTTP front door for remote
-gateway-agents), and `services/gateway-agent` (the BLE/serial agent for a
-host with physical radio access) all exist and are covered by a passing
-test suite (unit tests plus Docker-backed integration suites, see below).
-`docker-compose.yml` now has five services: `timescaledb`, `grafana`,
-`mqtt-ingest` (no `profiles:` — starts by default with a plain `docker
-compose up`), `tcp-poller` and `ingest-api` (both built locally, behind
-`profiles: ["extra-sources"]` — not started by a plain `docker compose
-up`). `docker-compose.gateway-agent.yml` is a separate, standalone compose
-file for a remote host with radio access. `services/archive-job` and
-`grafana/provisioning/*` are still empty placeholders (`.gitkeep`).
+gateway-agents), `services/gateway-agent` (the BLE/serial agent for a
+host with physical radio access), and `services/archive-job` (scheduled
+chunk export to Parquet + manifest-gated `drop_chunks`) all exist and are
+covered by a passing test suite (unit tests plus Docker-backed integration
+suites, see below). `docker-compose.yml` now has six services: `timescaledb`,
+`grafana`, `mqtt-ingest` and `archive-job` (no `profiles:` — start by
+default with a plain `docker compose up`), `tcp-poller` and `ingest-api`
+(both built locally, behind `profiles: ["extra-sources"]` — not started by
+a plain `docker compose up`). `docker-compose.gateway-agent.yml` is a
+separate, standalone compose file for a remote host with radio access.
+`grafana/provisioning/*` is still an empty placeholder (`.gitkeep`).
 
 ## Where things live
 
@@ -225,6 +226,41 @@ file for a remote host with radio access. `services/archive-job` and
   `build_subscribe_topic_filters()`, returning `(topic_filter, region)`
   pairs — `build_subscribe_topics()` is now a thin wrapper over it that
   drops the region half, kept for callers that don't need the pairing.
+- `services/archive-job/export_parquet.py` — the scheduled job that drives
+  `drop_chunks()` on `metric` (§6 of the design; no service writes to
+  `archive_manifest` except this one). No `main.py`; the module is both the
+  library and the entrypoint. Per aged chunk (`find_aged_chunks()` —
+  `timescaledb_information.chunks` where `range_end <= now() -
+  RAW_RETENTION_INTERVAL`), `archive_chunk()` runs export -> row-count
+  verify -> sha256 -> atomic rename -> (S3 upload, if configured) ->
+  `archive_manifest` insert -> `drop_chunks()` scoped to exactly that
+  chunk (via `older_than`/`newer_than` bounding it to `[range_start,
+  range_end)`) -> `dropped_at` update, resuming at the `drop_chunks` step
+  on a re-run if a manifest row already exists without `dropped_at` (job
+  died between the insert and the drop) rather than re-exporting; a chunk
+  with no manifest row is simply left alone and retried next run. Export
+  uses DuckDB's `postgres` scanner (`ATTACH ... (TYPE postgres)`) against
+  `archive_rw`, reading the chunk table directly (`pg."<chunk_schema>"."<chunk_name>"`)
+  — this also transparently reads already-compressed chunks (verified: a
+  chunk compressed via the compression policy still reads correctly
+  through the scanner, no special-casing needed). `metric.geom` arrives
+  through the scanner as a VARCHAR of hex-EWKB (Postgres's own text output
+  for a geography value with no native DuckDB equivalent);
+  `ST_GeomFromHEXEWKB` (the `spatial` extension) converts it to a DuckDB
+  GEOMETRY before the Parquet write, which is what makes the output
+  standard GeoParquet (§2.7) rather than an opaque blob column. `duckdb`,
+  `spatial`, and `postgres` extensions are `INSTALL`/`LOAD`ed at runtime
+  (not baked into the image), so the container needs outbound network
+  access on first run per extension version. `run_once(pg_conn, duckdb_con,
+  ...)` is the core, directly testable entry point; `python
+  export_parquet.py` runs it on an APScheduler cron trigger
+  (`ARCHIVE_SCHEDULE_CRON`, default `0 2 * * *` UTC) via `BlockingScheduler`,
+  and `python export_parquet.py --once` runs it a single time immediately
+  (for manual/operational use — e.g. right after lowering
+  `RAW_RETENTION_INTERVAL` to test the pipeline). S3/MinIO backend
+  (`ARCHIVE_BACKEND=s3`) uploads the verified local file via `boto3` and
+  then deletes the local copy — local and S3 are alternative backends, not
+  additive storage.
 - Config: `.env.sample`, `config/regions.yaml.sample`, `secrets/*.sample` —
   copy each to its real (gitignored) filename to configure a deployment.
   `secrets/ingest_api_token.txt.sample`/`INGEST_API_TOKEN` in `.env.sample`
@@ -248,10 +284,11 @@ file for a remote host with radio access. `services/archive-job` and
   `cryptography`, `PyYAML`, `psycopg[binary]>=3.1,<4`); root
   `requirements-dev.txt` adds `pytest`, `grpcio-tools` (for `make
   proto-gen`), `ruff`, `testcontainers` (for the `db.py` integration test),
-  `paho-mqtt` (mqtt-ingest), and `fastapi`/`httpx` (ingest-api's
-  `TestClient`), `requests`/`pyserial`/`bleak` (gateway-agent) so every
-  service's `main.py` is importable from the test venv, not just its own
-  container image. `ruff.toml` excludes `**/generated/` from lint (protoc
+  `paho-mqtt` (mqtt-ingest), `fastapi`/`httpx` (ingest-api's
+  `TestClient`), `requests`/`pyserial`/`bleak` (gateway-agent), and
+  `duckdb`/`apscheduler`/`boto3` (archive-job) so every service's
+  `main.py`/`export_parquet.py` is importable from the test venv, not just
+  its own container image. `ruff.toml` excludes `**/generated/` from lint (protoc
   output, not hand-written) and sets `flake8-bugbear.extend-immutable-calls
   = ["fastapi.Depends"]` (FastAPI's own required idiom is a function call
   as an argument default, which bugbear's B008 would otherwise flag as the
@@ -262,15 +299,20 @@ file for a remote host with radio access. `services/archive-job` and
   runs only the fast, Docker-free unit tests by default. Run the
   `integration`-marked tests with `make test-integration`.
   `tests/conftest.py` holds the shared Docker-backed fixtures:
-  - `ingest_dsn` (session-scoped): a real, disposable
+  - `_timescaledb_host_port` (session-scoped): a real, disposable
     `timescale/timescaledb-ha:pg16` container running the actual
     `db/init/*` scripts (via `testcontainers`' generic `DockerContainer`,
     not the `testcontainers.postgres` module, so it can mount `db/init` at
-    `/docker-entrypoint-initdb.d` exactly like `docker-compose.yml` does),
-    exposing a DSN that connects as `ingest_rw` (not the superuser, so any
-    test using it also exercises `50_roles.sh`'s actual grants). One
-    container is shared across every integration test module in a run;
-    tests stay isolated from each other by using disjoint `node_id`s
+    `/docker-entrypoint-initdb.d` exactly like `docker-compose.yml` does).
+    One container is shared across every integration test module in a
+    run — `ingest_dsn` and `archive_dsn` (below) both build their role DSN
+    against it rather than each starting their own container.
+  - `ingest_dsn` / `archive_dsn` (session-scoped, built on
+    `_timescaledb_host_port`): DSNs that connect as `ingest_rw` /
+    `archive_rw` respectively (never the superuser), so any test using
+    either also exercises `50_roles.sh`'s actual grants for that role, not
+    just the schema SQL. Tests stay isolated from each other by using
+    disjoint `node_id`s (and, for archive-job, disjoint historical dates)
     rather than by resetting the database between tests (`ingest_rw` has
     no TRUNCATE/DELETE grant anyway).
   - `mosquitto_broker` (session-scoped): a real, disposable
@@ -341,6 +383,25 @@ file for a remote host with radio access. `services/archive-job` and
     hedge that it isn't fully mockable in CI; BLE in particular has not
     been run against real hardware at all (see `services/gateway-agent/
     main.py`'s module docstring).
+  - `tests/test_archive_job.py` loads `services/archive-job/export_parquet.py`
+    the same `importlib` way (needing the same `sys.modules[spec.name] =
+    module` pre-registration as gateway-agent's tests, since it also
+    defines its own `@dataclass` classes). Uses both `ingest_dsn` (to
+    write historical rows via `write_envelopes()`) and `archive_dsn` (to
+    run `run_once()` as `archive_rw`, and a `duckdb_con` fixture built via
+    `build_duckdb_connection(archive_dsn)`), against a `tmp_path` archive
+    root. Identifies "its" chunk by date rather than by an exact global
+    chunk count, since the container is shared with every other
+    integration test module and some of those also insert historical
+    (already-aged) data. Covers: a full export -> verify -> manifest ->
+    drop_chunks run (asserting the Parquet file exists, the manifest row's
+    `row_count`/`sha256`/`dropped_at` are correct, the chunk is gone from
+    `timescaledb_information.chunks`, and DuckDB can read the archived
+    file's `geom` column back as valid WKT); and that a second `run_once()`
+    against an already-fully-archived chunk is a no-op (doesn't re-export
+    or touch the existing manifest row) — the resume-at-drop_chunks path
+    itself (manifest row present, `dropped_at` still null) has no test,
+    since triggering it needs killing the process mid-run.
 
 ## Facts that must stay in sync with this file
 
@@ -405,7 +466,10 @@ file for a remote host with radio access. `services/archive-job` and
   `tcp_nodes: []` is the common case and there's nothing useful for it to do
   by default), `ingest-api` (built locally from
   `services/ingest-api/Dockerfile`, host port `8000`, also `profiles:
-  ["extra-sources"]` — only needed once a remote gateway-agent exists).
+  ["extra-sources"]` — only needed once a remote gateway-agent exists),
+  `archive-job` (built locally from `services/archive-job/Dockerfile`, no
+  host port, no `profiles:` so it starts by default — bind-mounts
+  `./archive:/archive`, matching `ARCHIVE_LOCAL_PATH`'s default).
   `docker-compose.gateway-agent.yml` is a separate standalone compose file
   (not merged into the main one) for a remote host with radio access —
   builds the same `services/gateway-agent/Dockerfile` against this same
@@ -425,19 +489,32 @@ file for a remote host with radio access. `services/archive-job` and
   reads `regions.yaml` fields that reference other `${VAR}`s.
 - DB roles: `ingest_rw` (INSERT/SELECT/UPDATE on `metric`,
   `node_position_history`, `node_identity`, `archive_manifest` — no
-  DELETE/TRUNCATE, confirmed by the integration test above) and
-  `grafana_ro` (SELECT on `metric`, `metric_hourly`, `metric_daily`,
-  `metric_daily_v`, `node_identity`, `node_position_history`), created by
-  `db/init/50_roles.sh` with passwords from `INGEST_DB_PASSWORD` /
-  `GRAFANA_DB_PASSWORD`. `db.py`'s `write_envelopes()` only ever needs
+  DELETE/TRUNCATE, confirmed by the integration test above), `grafana_ro`
+  (SELECT on `metric`, `metric_hourly`, `metric_daily`, `metric_daily_v`,
+  `node_identity`, `node_position_history`), and `archive_rw` (SELECT on
+  `metric`; SELECT/INSERT/UPDATE on `archive_manifest`; **also a member of
+  the bootstrap superuser role** — `GRANT "${POSTGRES_USER}" TO
+  archive_rw`, i.e. "postgres" by default — because `drop_chunks()`
+  requires hypertable-owner privileges and a plain grant on the table
+  isn't sufficient; role membership gives archive_rw owner-equivalent
+  rights on `metric` without transferring the hypertable's actual
+  ownership away from postgres. This is deliberately not extended to
+  `ingest_rw`, to keep the elevated privilege scoped to the one
+  container — archive-job — that isn't network-facing; verified against a
+  real container: `GRANT postgres TO archive_rw` is sufficient for
+  `archive_rw` to call `drop_chunks('metric', ...)`, including on an
+  already-compressed chunk), created by `db/init/50_roles.sh` with
+  passwords from `INGEST_DB_PASSWORD` / `GRAFANA_DB_PASSWORD` /
+  `ARCHIVE_DB_PASSWORD`. `db.py`'s `write_envelopes()` only ever needs
   `ingest_rw`'s grants (INSERT + the UPDATE that `ON CONFLICT ... DO
   UPDATE` needs for `node_identity`). `ingest-api` is the only service that
   connects as `ingest_rw` on behalf of another process (gateway-agent
   itself has no DB access at all) rather than for its own directly-decoded
-  traffic. Neither role is yet wired into an
-  ingestion service's connection string — `db.py` takes a connection the
-  caller already opened, so that wiring happens as each ingestion/
-  Grafana-provisioning phase lands, not here.
+  traffic. `meshdb_common.connect` has `build_ingest_dsn()`/
+  `build_archive_dsn()` for the two respective roles (same
+  `INGEST_DB_HOST`/`PORT`/`NAME`, different role/password); `grafana_ro`
+  is not yet wired into any connection string — that happens once
+  Grafana's datasource provisioning phase lands.
 - **Running `db.py`'s integration test on macOS via colima**: testcontainers'
   default cleanup ("Ryuk") bind-mounts the host Docker socket into its own
   reaper container, which fails under colima specifically (`mkdir
@@ -452,10 +529,15 @@ file for a remote host with radio access. `services/archive-job` and
   `RAW_COMPRESS_AFTER=10 days` (compression policy on raw `metric`),
   `HOURLY_COMPRESS_AFTER=30 days`, `DAILY_COMPRESS_AFTER=90 days`
   (compression policies on the two continuous aggregates). No
-  `add_retention_policy()`/drop-chunks policy exists on `metric` — the
-  archive job will drive `drop_chunks` explicitly instead;
-  `RAW_RETENTION_INTERVAL` in `.env.sample` is reserved for that job and is
-  not yet consumed by anything.
+  `add_retention_policy()`/drop-chunks policy exists on `metric` — instead
+  `services/archive-job/export_parquet.py` reads `RAW_RETENTION_INTERVAL`
+  (default `1 year`) at each scheduled run and drives `drop_chunks`
+  explicitly, only after a verified Parquet export (see "Where things
+  live" above). Unlike the other four retention/rollup values above,
+  `RAW_RETENTION_INTERVAL` is read live on every run, not just at first
+  `db/init` — changing it in `.env` and restarting `archive-job` takes
+  effect on the next scheduled tick, with no `retune-retention`-style
+  caveat.
 - Continuous aggregate refresh schedules (fixed, not env-configurable):
   `metric_hourly` refreshes every 30 min (`start_offset` 3h, `end_offset`
   10min); `metric_daily` (built hierarchically from `metric_hourly`, not
@@ -531,9 +613,13 @@ file for a remote host with radio access. `services/archive-job` and
   `vendor/protobufs` submodule checked out. `make test-integration` needs
   Docker (colima on macOS — see the Ryuk/colima note above) and runs every
   `integration`-marked test (currently `test_db_write_path.py`,
-  `test_mqtt_ingest_replay.py`, `test_tcp_poller_replay.py`, and one case in
-  `test_ingest_api.py`, sharing one Postgres container via the `ingest_dsn`
-  fixture) separately from `make test`.
+  `test_mqtt_ingest_replay.py`, `test_tcp_poller_replay.py`,
+  `test_archive_job.py`, and one case in `test_ingest_api.py`, all sharing
+  one Postgres container via `_timescaledb_host_port`/`ingest_dsn`/
+  `archive_dsn`) separately from `make test`. `services/archive-job` also
+  needs outbound network access the first time it runs (`INSTALL postgres`/
+  `INSTALL spatial` fetch DuckDB extensions at runtime, not at container
+  build time) — a fully offline environment would need those pre-cached.
 - Retention/rollup changes need an explicit `make retune-retention` run,
   not a config reload — `docker-entrypoint-initdb.d` only runs once,
   against an empty volume, so editing `.env` after first init has no
@@ -545,3 +631,7 @@ file for a remote host with radio access. `services/archive-job` and
 - `vendor/protobufs` bumps will only auto-merge once the metric-name
   stability test exists — a failure there means a human needs to look, not
   that CI is broken.
+- Manually triggering an archive run (outside its `ARCHIVE_SCHEDULE_CRON`
+  schedule — e.g. after lowering `RAW_RETENTION_INTERVAL` to test the
+  pipeline against real data): `docker compose run --rm archive-job python
+  export_parquet.py --once`.

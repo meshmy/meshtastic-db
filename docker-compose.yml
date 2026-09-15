@@ -10,6 +10,7 @@ services:
       DAILY_COMPRESS_AFTER: ${DAILY_COMPRESS_AFTER}
       INGEST_DB_PASSWORD: ${INGEST_DB_PASSWORD}
       GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD}
+      ARCHIVE_DB_PASSWORD: ${ARCHIVE_DB_PASSWORD}
     volumes:
       - timescaledb_data:/home/postgres/pgdata/data
       - ./db/init:/docker-entrypoint-initdb.d:ro
@@ -88,6 +89,29 @@ services:
       - "8000:8000"
     secrets:
       - ingest_api_token
+
+  archive-job:
+    build:
+      context: .
+      dockerfile: services/archive-job/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - timescaledb
+    environment:
+      INGEST_DB_HOST: timescaledb
+      INGEST_DB_PORT: 5432
+      INGEST_DB_NAME: meshtastic
+      ARCHIVE_DB_PASSWORD: ${ARCHIVE_DB_PASSWORD}
+      RAW_RETENTION_INTERVAL: ${RAW_RETENTION_INTERVAL}
+      ARCHIVE_SCHEDULE_CRON: ${ARCHIVE_SCHEDULE_CRON}
+      ARCHIVE_BACKEND: ${ARCHIVE_BACKEND}
+      ARCHIVE_LOCAL_PATH: /archive
+      ARCHIVE_S3_BUCKET: ${ARCHIVE_S3_BUCKET}
+      ARCHIVE_S3_ENDPOINT: ${ARCHIVE_S3_ENDPOINT}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    volumes:
+      - ./archive:/archive
 
 volumes:
   timescaledb_data:

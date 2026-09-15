@@ -21,6 +21,17 @@ def build_ingest_dsn() -> str:
     return f"host={host} port={port} dbname={dbname} user=ingest_rw password={password}"
 
 
+def build_archive_dsn() -> str:
+    """Same INGEST_DB_HOST/PORT/NAME as build_ingest_dsn — only the role and
+    password differ, since archive_rw is a separate, more-privileged role
+    (drop_chunks() needs hypertable-owner privileges; see db/init/50_roles.sh)."""
+    host = os.environ.get("INGEST_DB_HOST", "timescaledb")
+    port = os.environ.get("INGEST_DB_PORT", "5432")
+    dbname = os.environ.get("INGEST_DB_NAME", "meshtastic")
+    password = resolve_secret("ARCHIVE_DB_PASSWORD")
+    return f"host={host} port={port} dbname={dbname} user=archive_rw password={password}"
+
+
 def connect_with_retry(dsn: str, *, timeout: float = 60.0) -> psycopg.Connection:
     """Container start order isn't the same as "ready to accept
     connections" — retry rather than crash-loop while Postgres finishes
