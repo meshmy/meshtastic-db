@@ -1,0 +1,29 @@
+name: proto-regen-check
+
+# Independently re-runs `make proto-gen` on any PR touching the vendored
+# protobufs or the code generated from them, and fails if that produces a
+# diff — catches drift even if a Renovate-generated commit was wrong or
+# was hand-edited afterward. Required alongside ci.yml and the
+# metric-name-stability test for the vendor/protobufs submodule bump to be
+# automerge-eligible (renovate.json).
+
+on:
+  pull_request:
+    paths:
+      - vendor/protobufs
+      - services/common/**
+
+jobs:
+  regen-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-dev.txt
+      - run: make proto-gen
+      - name: Fail if regeneration produced a diff
+        run: git diff --exit-code -- services/common/meshdb_common/generated

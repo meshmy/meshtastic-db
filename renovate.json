@@ -1,0 +1,33 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "enabledManagers": ["git-submodules", "pip_requirements", "dockerfile", "github-actions"],
+  "git-submodules": { "enabled": true },
+  "automerge": false,
+  "packageRules": [
+    {
+      "matchManagers": ["git-submodules"],
+      "matchDepNames": ["vendor/protobufs"],
+      "schedule": ["before 6am on monday"],
+      "postUpgradeTasks": {
+        "commands": [
+          "python3 -m venv .renovate-venv && .renovate-venv/bin/pip install -q -r requirements-dev.txt",
+          "PATH=\"$PWD/.renovate-venv/bin:$PATH\" make proto-gen",
+          "PATH=\"$PWD/.renovate-venv/bin:$PATH\" make update-golden-metrics",
+          "git add services/common/meshdb_common/generated tests/fixtures/known_metrics_golden.json"
+        ],
+        "executionMode": "branch"
+      },
+      "labels": ["protobuf-bump"],
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true
+    },
+    {
+      "matchManagers": ["pip_requirements"],
+      "matchPackageNames": ["meshtastic"],
+      "schedule": ["before 6am on monday"],
+      "labels": ["meshtastic-lib-bump", "needs-review"]
+    }
+  ]
+}

@@ -16,7 +16,8 @@ or sizing math behind each decision.
 
 **Current status: the schema, decode library, shared write path, all four
 ingestion services (mqtt-ingest, tcp-poller, ingest-api, gateway-agent),
-the archive job, and Grafana provisioning are built.** The directory
+the archive job, Grafana provisioning, and the Renovate/CI wiring are
+built.** The directory
 layout, config templates, the TimescaleDB/PostGIS schema (`db/init/*`),
 `services/common/meshdb_common`'s decode side (protobuf codegen,
 reflection-based decode, PortNum dispatch, MQTT decrypt, region config
@@ -561,6 +562,37 @@ for a remote host with radio access.
     needs real outbound network access on every container start, same
     caveat as `services/archive-job`'s DuckDB extensions.
 
+- `renovate.json` + `.github/workflows/` — the automated-update gating that
+  keeps "always-fresh protobufs" (§3.1/§8 of the design) true over time.
+  `tests/golden_metrics.py` builds a fixed corpus of synthetic messages
+  (one populated instance per Telemetry oneof variant, Routing's two oneof
+  arms, NeighborInfo, Traceroute, MapReport — every leaf field on each, not
+  just a couple) and decodes it through `decode_data()`, producing the
+  `(portnum, metric_name, value_type)` tuples that `write_golden()` freezes
+  into `tests/fixtures/known_metrics_golden.json`; `make
+  update-golden-metrics` reruns it, `test_metric_name_stability.py` asserts
+  the golden set is still a **subset** of what current code produces (a
+  pure addition — a new field — passes automatically; a rename or removal
+  fails, which is the silent-fork case this exists to catch — see §8/§10.2a
+  of the design for the full rationale). Deliberately scoped to the portnums
+  `decode_data()` routes through `walk_message()` — Position/NodeInfo are
+  excluded, since `_extract_position`/`_extract_identity` reference field
+  names directly and so already fail loudly (`AttributeError`) on a rename
+  rather than silently renaming a `metric_name`. `.github/workflows/ci.yml`
+  runs `make lint`/`make test`/`make test-integration` (the last needs no
+  colima workaround on GitHub-hosted Ubuntu runners — Docker is native
+  there; `TESTCONTAINERS_RYUK_DISABLED=true` is harmless when set anyway).
+  `.github/workflows/proto-regen-check.yml` re-runs `make proto-gen` on any
+  PR touching `vendor/protobufs`/`services/common/**` and fails on a diff.
+  `.github/workflows/auto-approve-renovate.yml` approves only a PR opened
+  by `renovate[bot]` carrying the `protobuf-bump` label (gated on actor +
+  label alone, both GitHub-verified and not spoofable via PR content;
+  never checks out the PR branch). `.github/workflows/renovate.yml` runs
+  Renovate itself self-hosted (needed so `postUpgradeTasks` can execute
+  `make proto-gen`/`make update-golden-metrics` against a real checkout),
+  gated by `RENOVATE_ALLOWED_POST_UPGRADE_COMMANDS` regexes matching
+  exactly the commands `renovate.json`'s `postUpgradeTasks` runs.
+
 ## Facts that must stay in sync with this file
 
 - Vendored protobufs commit: `723a31e` (`meshtastic/protobufs`, submodule
@@ -743,6 +775,16 @@ for a remote host with radio access.
   raw is capped by its 1-year hot window and `metric_daily` stays
   low-cardinality by construction, but hourly grows for as long as it's
   kept "forever" and scales linearly with node count.
+- Pinned GitHub Actions in `.github/workflows/`: `actions/checkout@v7`,
+  `actions/setup-python@v7`, `renovatebot/github-action@v46.1.16`,
+  `hmarr/auto-approve-action@v4.0.0` — Renovate's own `github-actions`
+  manager (enabled in `renovate.json`) keeps these current going forward,
+  the same automated-update pattern applied to itself.
+- `tests/golden_metrics.py`'s corpus currently produces 176
+  `(portnum, metric_name, value_type)` tuples across 5 portnums (Telemetry,
+  Routing, NeighborInfo, Traceroute, MapReport) — grows whenever a
+  deliberate field is added to the corpus, shrinks never (a shrink would
+  mean the corpus itself lost coverage, worth a second look).
 - One known-benign warning on init: `30_compression_retention.sh` logs
   `WARNING: column "packet_id" should be used for segmenting or ordering`
   when compressing `metric` — expected, since `packet_id` is part of the
@@ -843,3 +885,15 @@ for a remote host with radio access.
   schedule — e.g. after lowering `RAW_RETENTION_INTERVAL` to test the
   pipeline against real data): `docker compose run --rm archive-job python
   export_parquet.py --once`.
+- **This repo has no GitHub remote configured yet** (`git remote -v` is
+  empty) — `.github/workflows/*.yml` and `renovate.json` are unverified
+  against real GitHub Actions runs; only their YAML/JSON validity and the
+  local pieces they invoke (`make lint`/`make test`/`make test-integration`/
+  `make proto-gen`/`make update-golden-metrics`, the metric-name-stability
+  test itself) are confirmed. Once a remote exists, still needed before any
+  of this is live: push the repo, add a `RENOVATE_TOKEN` secret (a PAT with
+  repo access, for `renovate.yml`'s self-hosted run), and — in GitHub repo
+  settings, not a file in this tree — enable branch protection on `main`
+  requiring `ci.yml`'s three jobs and `proto-regen-check.yml` as required
+  status checks, plus enable the native merge queue (so
+  `platformAutomerge: true` in `renovate.json` has a queue to enqueue into).

@@ -1,0 +1,28 @@
+name: auto-approve-renovate
+
+# Approves only a vendor/protobufs submodule-bump PR opened by Renovate
+# itself — gated on the actor and label alone (both verified by GitHub, not
+# spoofable via PR content), and never checking out or executing the PR
+# branch's code. Required checks (ci.yml, proto-regen-check.yml, and the
+# metric-name-stability test inside ci.yml's test job) still have to pass
+# independently before the merge queue will serialize the actual merge —
+# this workflow only supplies the approving review a branch-protection
+# "required review" rule would otherwise block automerge on.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  approve:
+    if: >
+      github.actor == 'renovate[bot]' &&
+      contains(github.event.pull_request.labels.*.name, 'protobuf-bump')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: hmarr/auto-approve-action@v4.0.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}

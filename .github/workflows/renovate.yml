@@ -1,0 +1,35 @@
+name: renovate
+
+# Self-hosted Renovate run (not the hosted GitHub App) — needed so
+# postUpgradeTasks (renovate.json) can execute `make proto-gen`/`make
+# update-golden-metrics` against this repo's own checkout. Triggered near
+# the "before 6am on monday" window renovate.json's protobufs packageRule
+# schedules its own PR creation against (Renovate still enforces that
+# schedule itself; this just needs to run often enough to catch it), plus
+# workflow_dispatch for an on-demand run.
+
+on:
+  schedule:
+    - cron: "0 22 * * 0" # ~6am Monday UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  renovate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Self-hosted Renovate
+        uses: renovatebot/github-action@v46.1.16
+        env:
+          # postUpgradeTasks commands (renovate.json) must each match one of
+          # these patterns, or Renovate silently skips them.
+          RENOVATE_ALLOWED_POST_UPGRADE_COMMANDS: >-
+            ["^python3 -m venv .*", "^PATH=.* make .*", "^git add .*"]
+        with:
+          configurationFile: renovate.json
+          token: ${{ secrets.RENOVATE_TOKEN }}

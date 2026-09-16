@@ -1,4 +1,4 @@
-.PHONY: up down proto-gen test test-integration lint retune-retention
+.PHONY: up down proto-gen test test-integration lint retune-retention update-golden-metrics
 
 up:
 	docker compose up -d
@@ -26,6 +26,13 @@ test-integration:
 
 lint:
 	ruff check services/ tests/
+
+# Regenerates tests/fixtures/known_metrics_golden.json from the current
+# decode pipeline. Run after a deliberate vendor/protobufs bump that adds
+# fields on purpose — see tests/golden_metrics.py and
+# tests/test_metric_name_stability.py.
+update-golden-metrics:
+	python tests/golden_metrics.py
 
 retune-retention:
 	@echo "retune-retention: not yet implemented"
