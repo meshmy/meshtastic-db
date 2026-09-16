@@ -1,0 +1,21 @@
+# Isolated region config for bin/smoke-test.sh only -- never the deployer's
+# own config/regions.yaml. Points at the disposable `mosquitto` service
+# docker-compose.test.yml adds, under a region name ("SMOKE") no real
+# deployment would use.
+allowed_regions: [SMOKE]
+
+mqtt:
+  topic_template: "msh/{region}/2/{version}/#"
+  brokers:
+    - host: mosquitto
+      port: 1883
+      tls: false
+  channels:
+    - name: "*"
+      psk_base64: "AQ=="
+
+tcp_nodes: []
+
+gateway_agent:
+  region: null
+  connection: {type: serial, port: /dev/ttyUSB0}

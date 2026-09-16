@@ -16,8 +16,9 @@ or sizing math behind each decision.
 
 **Current status: the schema, decode library, shared write path, all four
 ingestion services (mqtt-ingest, tcp-poller, ingest-api, gateway-agent),
-the archive job, Grafana provisioning, and the Renovate/CI wiring are
-built.** The directory
+the archive job, Grafana provisioning, the Renovate/CI wiring, an
+end-to-end `docker compose` smoke test, and operator-facing runbooks
+(`docs/*.md`) are all built.** The directory
 layout, config templates, the TimescaleDB/PostGIS schema (`db/init/*`),
 `services/common/meshdb_common`'s decode side (protobuf codegen,
 reflection-based decode, PortNum dispatch, MQTT decrypt, region config
@@ -562,6 +563,48 @@ for a remote host with radio access.
     needs real outbound network access on every container start, same
     caveat as `services/archive-job`'s DuckDB extensions.
 
+- `bin/smoke-test.sh` (`make smoke-test`) — the one check that runs the
+  *actual* `docker-compose.yml` services (built Dockerfiles, real
+  env/secrets/volume wiring), rather than driving each service's Python
+  entrypoint in-process or spinning up ad hoc containers via
+  `testcontainers` the way every test above does. Uses
+  `docker-compose.test.yml` (an overlay — always passed together with
+  `docker-compose.yml`, never standalone) to add a disposable
+  anonymous-access `mosquitto` broker and repoint `mqtt-ingest` at
+  `tests/smoke/regions.yaml` (region `SMOKE`) instead of a deployer's real
+  `config/regions.yaml`; runs under compose project name
+  `meshtastic-db-smoke` and host ports 15432/13000 (via the compose-spec
+  `!override` YAML merge tag — a plain re-declaration of `ports:` in an
+  overlay *appends* rather than replaces, which would otherwise double-bind
+  5432/3000 alongside a real deployment's own) so it can run alongside a
+  real stack without a port clash. Sequence: build `mqtt-ingest`, start
+  `timescaledb`/`grafana`/`mosquitto`/`mqtt-ingest`, wait for the
+  `connected, subscribed` log line (publishing before mqtt-ingest has
+  actually subscribed silently loses the message — no persistent MQTT
+  session is configured), run `tests/smoke/corpus_publisher.py` inside the
+  already-built `mqtt-ingest` image (`docker compose run --rm --no-deps`,
+  with `./tests` bind-mounted in) to publish one Telemetry/Position/NodeInfo
+  packet each over real MQTT, poll Postgres for the resulting `metric`/
+  `node_position_history`/`node_identity` rows, then confirm Grafana's
+  `/api/health` and the provisioned dashboard's API endpoint respond.
+  `secrets/mqtt_password.txt` must already exist (content unused —
+  mosquitto allows anonymous access — but `docker-compose.yml` declares it
+  as a required Compose secret file for the `mqtt-ingest` service); the
+  script errors out early with instructions if it's missing rather than
+  creating it. Always tears down (`down -v --remove-orphans`) on exit via a
+  trap, success or failure.
+
+- `docs/regions.md`, `docs/gateway-agent.md`, `docs/archive-and-retention.md`
+  — operator-facing runbooks linked from `README.md`, each covering one
+  area in more depth than the README's quickstart: region/broker/PSK
+  configuration and how to tell it's actually working; gateway-agent
+  deployment (serial vs. BLE, WAL spillover, the `meshtastic`-PyPI-package
+  non-dependency); and the raw/hourly/daily tiers, which retention knobs
+  are live-reloadable vs. init-once, and querying the archive. Distinct
+  from this file: `AGENTS.md` is the fast-orientation reference for working
+  *on* the codebase; `docs/*.md` are for someone *operating* a deployment
+  and not necessarily reading source.
+
 - `renovate.json` + `.github/workflows/` — the automated-update gating that
   keeps "always-fresh protobufs" (§3.1/§8 of the design) true over time.
   `tests/golden_metrics.py` builds a fixed corpus of synthetic messages
@@ -579,10 +622,12 @@ for a remote host with radio access.
   excluded, since `_extract_position`/`_extract_identity` reference field
   names directly and so already fail loudly (`AttributeError`) on a rename
   rather than silently renaming a `metric_name`. `.github/workflows/ci.yml`
-  runs `make lint`/`make test`/`make test-integration` (the last needs no
-  colima workaround on GitHub-hosted Ubuntu runners — Docker is native
-  there; `TESTCONTAINERS_RYUK_DISABLED=true` is harmless when set anyway).
-  `.github/workflows/proto-regen-check.yml` re-runs `make proto-gen` on any
+  runs four jobs: `make lint`, `make test`, `make test-integration` (the
+  last needs no colima workaround on GitHub-hosted Ubuntu runners — Docker
+  is native there; `TESTCONTAINERS_RYUK_DISABLED=true` is harmless when set
+  anyway), and `make smoke-test` (copies `secrets/mqtt_password.txt.sample`
+  into place first, since a fresh checkout has no real secrets — see below
+  for what the smoke test itself does). `.github/workflows/proto-regen-check.yml` re-runs `make proto-gen` on any
   PR touching `vendor/protobufs`/`services/common/**` and fails on a diff.
   `.github/workflows/auto-approve-renovate.yml` approves only a PR opened
   by `renovate[bot]` carrying the `protobuf-bump` label (gated on actor +
@@ -884,16 +929,27 @@ for a remote host with radio access.
 - Manually triggering an archive run (outside its `ARCHIVE_SCHEDULE_CRON`
   schedule — e.g. after lowering `RAW_RETENTION_INTERVAL` to test the
   pipeline against real data): `docker compose run --rm archive-job python
-  export_parquet.py --once`.
+  export_parquet.py --once`. See `docs/archive-and-retention.md` for the
+  full tier/retention breakdown.
+- `make smoke-test` (`bin/smoke-test.sh`) builds and runs the real compose
+  services end to end against a disposable broker — the check to reach for
+  after touching a Dockerfile, `docker-compose.yml`, or secrets/env wiring,
+  as distinct from `make test-integration`'s in-process/testcontainers
+  coverage of decode/write correctness. `docs/regions.md` and
+  `docs/gateway-agent.md` cover region configuration and gateway-agent
+  deployment in operator-facing depth beyond this file's own summaries
+  above.
 - **This repo has no GitHub remote configured yet** (`git remote -v` is
   empty) — `.github/workflows/*.yml` and `renovate.json` are unverified
   against real GitHub Actions runs; only their YAML/JSON validity and the
   local pieces they invoke (`make lint`/`make test`/`make test-integration`/
-  `make proto-gen`/`make update-golden-metrics`, the metric-name-stability
-  test itself) are confirmed. Once a remote exists, still needed before any
-  of this is live: push the repo, add a `RENOVATE_TOKEN` secret (a PAT with
-  repo access, for `renovate.yml`'s self-hosted run), and — in GitHub repo
-  settings, not a file in this tree — enable branch protection on `main`
-  requiring `ci.yml`'s three jobs and `proto-regen-check.yml` as required
-  status checks, plus enable the native merge queue (so
-  `platformAutomerge: true` in `renovate.json` has a queue to enqueue into).
+  `make smoke-test`/`make proto-gen`/`make update-golden-metrics`, the
+  metric-name-stability test itself) are confirmed. Once a remote exists,
+  still needed before any of this is live: push the repo, add a
+  `RENOVATE_TOKEN` secret (a PAT with repo access, for `renovate.yml`'s
+  self-hosted run), and — in GitHub repo settings, not a file in this tree —
+  enable branch protection on `main` requiring `ci.yml`'s four jobs
+  (`lint`, `test`, `test-integration`, `smoke-test`) and
+  `proto-regen-check.yml` as required status checks, plus enable the native
+  merge queue (so `platformAutomerge: true` in `renovate.json` has a queue
+  to enqueue into).

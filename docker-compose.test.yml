@@ -1,0 +1,35 @@
+# Overlay for bin/smoke-test.sh's end-to-end compose smoke test. Adds a
+# disposable, anonymous-access mosquitto broker and repoints mqtt-ingest at
+# it via tests/smoke/regions.yaml -- an isolated config that never touches a
+# deployer's own .env/config/regions.yaml/secrets/*. Always run together
+# with docker-compose.yml (`-f docker-compose.yml -f docker-compose.test.yml`),
+# never standalone: it only overrides/extends services the base file defines.
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    volumes:
+      - ./tests/smoke/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+  mqtt-ingest:
+    depends_on:
+      - timescaledb
+      - mosquitto
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_USERNAME: ""
+    volumes:
+      - ./tests/smoke/regions.yaml:/config/regions.yaml:ro
+      - ./tests:/tests:ro
+
+  # Isolated host ports so the smoke test can run alongside a real
+  # deployment's own docker-compose.yml (which publishes 5432/3000) without
+  # a port clash -- the smoke test always talks to these via the
+  # `meshtastic-db-smoke` compose project's own network, not these host
+  # ports, but psql/curl from the host (bin/smoke-test.sh) need them.
+  timescaledb:
+    ports: !override
+      - "15432:5432"
+
+  grafana:
+    ports: !override
+      - "13000:3000"

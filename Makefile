@@ -1,10 +1,17 @@
-.PHONY: up down proto-gen test test-integration lint retune-retention update-golden-metrics
+.PHONY: up down proto-gen test test-integration smoke-test lint retune-retention update-golden-metrics
 
 up:
 	docker compose up -d
 
 down:
 	docker compose down
+
+# Builds and runs the real docker-compose.yml services (not testcontainers
+# substitutes) end to end against a disposable mosquitto broker. Needs
+# Docker; see bin/smoke-test.sh for what it checks and why it's separate
+# from `make test-integration`.
+smoke-test:
+	./bin/smoke-test.sh
 
 proto-gen:
 	python -m grpc_tools.protoc -I vendor/protobufs \
