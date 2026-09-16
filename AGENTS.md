@@ -16,26 +16,27 @@ or sizing math behind each decision.
 
 **Current status: the schema, decode library, shared write path, all four
 ingestion services (mqtt-ingest, tcp-poller, ingest-api, gateway-agent),
-and the archive job are built.** The directory layout, config templates,
-the TimescaleDB/PostGIS schema (`db/init/*`), `services/common/meshdb_common`'s
-decode side (protobuf codegen, reflection-based decode, PortNum dispatch,
-MQTT decrypt, region config loading), its write side (`db.py` — batched
-insert, dedup, as-of position join, identity upsert), its shared
-ingestion-service plumbing (`batching.py`, `connect.py`,
-`stream_framing.py`, `serialization.py` — see below), `services/mqtt-ingest`
-(the central MQTT subscriber), `services/tcp-poller` (the central TCP
-poller), `services/ingest-api` (the HTTP front door for remote
-gateway-agents), `services/gateway-agent` (the BLE/serial agent for a
-host with physical radio access), and `services/archive-job` (scheduled
-chunk export to Parquet + manifest-gated `drop_chunks`) all exist and are
-covered by a passing test suite (unit tests plus Docker-backed integration
-suites, see below). `docker-compose.yml` now has six services: `timescaledb`,
-`grafana`, `mqtt-ingest` and `archive-job` (no `profiles:` — start by
-default with a plain `docker compose up`), `tcp-poller` and `ingest-api`
-(both built locally, behind `profiles: ["extra-sources"]` — not started by
-a plain `docker compose up`). `docker-compose.gateway-agent.yml` is a
-separate, standalone compose file for a remote host with radio access.
-`grafana/provisioning/*` is still an empty placeholder (`.gitkeep`).
+the archive job, and Grafana provisioning are built.** The directory
+layout, config templates, the TimescaleDB/PostGIS schema (`db/init/*`),
+`services/common/meshdb_common`'s decode side (protobuf codegen,
+reflection-based decode, PortNum dispatch, MQTT decrypt, region config
+loading), its write side (`db.py` — batched insert, dedup, as-of position
+join, identity upsert), its shared ingestion-service plumbing
+(`batching.py`, `connect.py`, `stream_framing.py`, `serialization.py` —
+see below), `services/mqtt-ingest` (the central MQTT subscriber),
+`services/tcp-poller` (the central TCP poller), `services/ingest-api` (the
+HTTP front door for remote gateway-agents), `services/gateway-agent` (the
+BLE/serial agent for a host with physical radio access),
+`services/archive-job` (scheduled chunk export to Parquet + manifest-gated
+`drop_chunks`), and `grafana/` (datasource + dashboard provisioning) all
+exist and are covered by a passing test suite (unit tests plus
+Docker-backed integration suites, see below). `docker-compose.yml` has six
+services: `timescaledb`, `grafana`, `mqtt-ingest` and `archive-job` (no
+`profiles:` — start by default with a plain `docker compose up`),
+`tcp-poller` and `ingest-api` (both built locally, behind `profiles:
+["extra-sources"]` — not started by a plain `docker compose up`).
+`docker-compose.gateway-agent.yml` is a separate, standalone compose file
+for a remote host with radio access.
 
 ## Where things live
 
@@ -261,6 +262,127 @@ separate, standalone compose file for a remote host with radio access.
   (`ARCHIVE_BACKEND=s3`) uploads the verified local file via `boto3` and
   then deletes the local copy — local and S3 are alternative backends, not
   additive storage.
+- `grafana/` — datasource + dashboard provisioning (§7/§8 of the design;
+  no application code, just config files mounted read-only into the
+  `grafana` container). `grafana.ini` sets `[plugins]
+  allow_loading_unsigned_plugins = motherduck-duckdb-datasource` (the one
+  setting that has to live in the ini file rather than a `GF_*` env var —
+  see below for why). `provisioning/datasources/datasources.yaml`
+  provisions two datasources: `timescaledb` (uid), Grafana's built-in
+  Postgres plugin (`type: postgres` in the YAML; the API reports it back
+  as the canonical `grafana-postgresql-datasource`), connecting as
+  `grafana_ro` to `timescaledb:5432` with `timescaledb: true` (enables
+  Timescale-aware query-editor macros) — its password comes from
+  `secureJsonData.password: ${GRAFANA_DB_PASSWORD}`, Grafana's own native
+  `${VAR}`-expansion-from-container-env for provisioning files (unrelated
+  to `docker-compose.yml`'s own `${VAR}` substitution; both have to line
+  up, which is why `GRAFANA_DB_PASSWORD` is now also passed into the
+  `grafana` service's container environment, not just `timescaledb`'s);
+  and `archive-duckdb` (uid), the unsigned
+  `motherduckdb/grafana-duckdb-datasource` plugin (plugin id
+  `motherduck-duckdb-datasource`) with an empty `jsonData.path` (opens an
+  in-memory DuckDB — no persistent `.duckdb` file) and `initSql: 'INSTALL
+  spatial; LOAD spatial;'` so ad hoc queries can read `metric.geom` back
+  out of an archived GeoParquet file. Every ad hoc query against it names
+  its own `read_parquet('/archive/parquet/metric/...')` glob — the archive
+  layout `export_parquet.py` writes (see above) — rather than the
+  datasource pointing at one fixed file. `provisioning/dashboards/
+  dashboards.yaml` is the file-provider config (points at
+  `/etc/grafana/provisioning/dashboards`); `meshtastic-overview.json` is
+  the one provisioned dashboard (uid `meshtastic-overview`, currently
+  `version: 6` inside the JSON — bump this whenever the file changes, it's
+  how Grafana's own file-provisioner decides a re-read copy is newer than
+  what's in its database): `$region`/`$node_id` template variables
+  (query-type, the second filtered by the first). **`$node_id` has a
+  wildcard "All" option** (`includeAll: true`, `allValue: "-1"`, `multi:
+  false`) — `-1` because `node_id` is always a non-negative uint32 off the
+  wire, so no real row can ever match it, and every telemetry panel's WHERE
+  clause is `($node_id::bigint = -1 OR node_id = $node_id::bigint)`: true
+  unconditionally when "All" is selected (Grafana substitutes the same
+  resolved value, `-1`, into both occurrences of `$node_id`), otherwise an
+  exact match on whichever real node_id is picked — this is how a
+  fleet-wide comparison and a single-node view are the same panel, not
+  two. **Every `$node_id` reference is cast `::bigint`, in every panel that
+  uses it, not just the telemetry rows** — see "Facts that must stay in
+  sync" below for why this is load-bearing, not decorative.
+
+  **One collapsed row per Telemetry oneof variant** the design calls out by
+  name — Device/Environment/Air Quality/Power Metrics, Local Stats (§7's
+  own explicit list; newer upstream variants — `health_metrics`,
+  `host_metrics`, `soil_water_metrics`, present in `telemetry.proto` but
+  not in the design doc — have no row yet, the documented
+  "visualization-layer limit, not a database one"). Each row has exactly
+  one *template* panel in the JSON, nested inside the row panel's own
+  `panels` array (Grafana's schema for a `collapsed: true` row; its
+  children are *not* top-level siblings in the dashboard's own `panels`
+  list the way an expanded row's are, which is why
+  `tests/test_grafana_provisioning.py`'s `_iter_panels()` has to flatten
+  one level into any row before indexing panels by title) — but that one
+  panel **repeats** (`"repeat": "<variant>_field"`, `"repeatDirection":
+  "v"`) over a same-named, hidden (`hide: 2`), multi-value, `$region`-scoped
+  variable whose query is `SELECT DISTINCT metric_name FROM metric WHERE
+  packet_type = 'Telemetry' AND metric_name LIKE '<variant>.%' AND region =
+  '$region'`, `current` pinned to Grafana's `$__all` sentinel (a hidden
+  variable has no UI for a person to ever pick "All" themselves, so its
+  default has to already resolve to every option). **This is what makes
+  "one graph per metric" require zero hardcoded field list and zero
+  dashboard-JSON change when a new field starts showing up**: the variable
+  literally is "every `metric_name` this variant currently has in the
+  database", Grafana renders one repeated panel per value, and each
+  repeated instance's own query filters `metric_name = '<the one
+  resolved value>'` and substitutes `$node_id` the same wildcard-aware way
+  every other panel does — series labelled just
+  `coalesce(short_name, long_name, '0x'||hex(node_id))` via a `LEFT JOIN
+  node_identity`, since the panel's own (repeated) title already names the
+  field. A brand-new protobuf field flows all the way from `vendor/protobufs`
+  to its own graph on this dashboard with **no code change and no dashboard
+  edit** — the same reflection property `walk_message()` gives the decode
+  pipeline (§3.3), now extended one layer further into the visualization
+  layer. `custom.spanNulls: true` + `showPoints: "always"` in each panel's
+  `fieldConfig.defaults` connects points with a line across the gaps
+  irregular telemetry intervals would otherwise leave, rather than
+  Grafana's default of breaking the line at each gap.
+
+  Two panels the wildcard doesn't reach — `$node_id track (selected time
+  range)` (Geomap) and `$node_id identity` (table), both still filtered by
+  `node_id = $node_id` with no `OR -1` — are deliberately left showing
+  nothing when "All" is selected: a multi-node "track" would just be
+  disconnected points from different nodes drawn as one nonsensical line,
+  and there's no fleet-wide identity table on this dashboard any more (an
+  earlier revision had one — an "All Nodes" row — removed once the
+  `$node_id` wildcard made it redundant; the `$node_id` dropdown itself
+  already lists every node by name to pick from). After the five collapsed
+  rows: a Node Map row (two Geomap panels: current positions in `$region`,
+  and the single-node track above) and a Node Detail row (the single-node
+  identity table above) — both expanded by default. **Deliberately queries
+  raw `metric` (time-filtered via `$__timeFilter`), not
+  `metric_hourly`/`metric_daily_v`**: the continuous aggregates only
+  populate on their own refresh schedule (30 min / hourly, see "Facts that
+  must stay in sync" below), so a dashboard built against them would show
+  empty panels for a while after fresh data lands — raw `metric` is always
+  current. Switching (some or all of) these panels to the rollups for
+  longer time ranges is a possible future enhancement, not wired up.
+
+  **Every `metric_name` reference matches `decode_data()`'s actual output,
+  not `db/init/10_schema.sql`'s doc comment** — that comment's example
+  (`'telemetry.environment_metrics.temperature'`) has a `telemetry.` prefix
+  that doesn't actually exist: `decode_data()` calls `walk_message()`
+  directly on the inner Telemetry message with no prefix, so real rows are
+  `environment_metrics.temperature` etc. `tests/test_grafana_provisioning.py`
+  decodes real `Telemetry` messages through `walk_message()` and checks
+  each variant's field-list variable query and repeat wiring
+  (`test_telemetry_panel_repeats_over_its_field_variable`), plus that every
+  field variable is genuinely hidden/multi-value/`$__all`-defaulted
+  (`test_field_variable_is_hidden_multi_value_and_region_scoped`) —
+  specifically to catch this class of mistake landing in the dashboard
+  again. `integration`-marked tests run the actual field-list variable
+  query through Grafana's real API and confirm it returns exactly the
+  `metric_name`s just seeded (proof the "no hardcoded list" property holds
+  for real, not just that the query text looks right), and run one variant
+  panel's query with `$node_id` substituted `-1` vs. a real node_id —
+  once, both seeded nodes' series must come back; the other, only one's —
+  proof the wildcard actually switches between "all nodes" and "one node"
+  rather than just widening what "one node" already showed.
 - Config: `.env.sample`, `config/regions.yaml.sample`, `secrets/*.sample` —
   copy each to its real (gitignored) filename to configure a deployment.
   `secrets/ingest_api_token.txt.sample`/`INGEST_API_TOKEN` in `.env.sample`
@@ -402,6 +524,42 @@ separate, standalone compose file for a remote host with radio access.
     or touch the existing manifest row) — the resume-at-drop_chunks path
     itself (manifest row present, `dropped_at` still null) has no test,
     since triggering it needs killing the process mid-run.
+  - `tests/test_grafana_provisioning.py` covers `grafana/` in two layers.
+    Fast, Docker-free tests (no `integration` mark): parse
+    `datasources.yaml`/`dashboards.yaml`/`meshtastic-overview.json` and
+    assert their structure, and — the regression guard described above —
+    decode a real `telemetry_pb2.Telemetry` per oneof variant through
+    `walk_message()` and assert each panel's `metric_name LIKE
+    '<variant>.%'` filter matches what actually comes out. Three
+    `integration`-marked tests bring up a real, disposable
+    `grafana/grafana:11.3.0-ubuntu` container (the `grafana_base_url`
+    fixture) running this repo's actual `grafana.ini`/`provisioning/`
+    files unmodified, joined to a new `_test_network` (a
+    `testcontainers.core.network.Network`) alongside the shared
+    `_timescaledb_host_port` container — aliased `timescaledb` on that
+    network, the same hostname `docker-compose.yml` gives it in
+    production, so the provisioning YAML needs no test-only override —
+    and drive Grafana's real HTTP API (`/api/datasources`,
+    `/api/dashboards/uid/...`, `/api/ds/query`, Basic auth as `admin`)
+    against it: one confirms both datasources and the dashboard are
+    actually provisioned; one seeds a `metric` row via `ingest_dsn` and
+    runs the Device Metrics panel's own query through `/api/ds/query`
+    against the `timescaledb` datasource, asserting the seeded value comes
+    back (the phase's "dashboard renders against seeded test data"
+    acceptance criterion); one runs a real `export_parquet.run_once()`
+    (same pattern as `test_archive_job.py`) into a bind-mounted
+    `archive_root` (created under the repo tree, not the system tempdir —
+    same colima-bind-mount-visibility reason as `mosquitto_broker`'s conf
+    dir) and queries the `archive-duckdb` datasource's `read_parquet(...)`
+    over it (the "DuckDB datasource queries an archived Parquet file"
+    criterion). The DuckDB plugin's `/api/ds/query` `format` field must be
+    the numeric `sqlutil.FormatQueryOption` (`1` for table), not the
+    string `"table"` the built-in Postgres plugin accepts — found by
+    running the test against a real container, not from any plugin doc;
+    worth knowing before adding another DuckDB-datasource query
+    elsewhere. `GF_INSTALL_PLUGINS` (both here and in `docker-compose.yml`)
+    needs real outbound network access on every container start, same
+    caveat as `services/archive-job`'s DuckDB extensions.
 
 ## Facts that must stay in sync with this file
 
@@ -458,7 +616,14 @@ separate, standalone compose file for a remote host with radio access.
   key" from `channel_id` alone.
 - Compose services defined so far: `timescaledb` (`timescale/timescaledb-ha:pg16`,
   host port `5432`), `grafana` (`grafana/grafana:11.3.0-ubuntu`, host port
-  `3000`), `mqtt-ingest` (built locally from `services/mqtt-ingest/Dockerfile`,
+  `3000`; mounts `./grafana/grafana.ini`, `./grafana/provisioning`, and
+  `./archive:/archive:ro` — the last one so its DuckDB datasource can read
+  archived Parquet files at the same `/archive/...` path
+  `export_parquet.py` writes them at; env `GF_INSTALL_PLUGINS` installs the
+  unsigned `motherduck-duckdb-datasource` plugin straight from its GitHub
+  release zip, pinned to `v0.4.5`, on every container start — see
+  "Where things live" above for the full provisioning breakdown),
+  `mqtt-ingest` (built locally from `services/mqtt-ingest/Dockerfile`,
   no host port — outbound-only, no `profiles:` so it starts by default),
   `tcp-poller` (built locally from `services/tcp-poller/Dockerfile`, no host
   port, `profiles: ["extra-sources"]` — needs `docker compose --profile
@@ -513,8 +678,39 @@ separate, standalone compose file for a remote host with radio access.
   traffic. `meshdb_common.connect` has `build_ingest_dsn()`/
   `build_archive_dsn()` for the two respective roles (same
   `INGEST_DB_HOST`/`PORT`/`NAME`, different role/password); `grafana_ro`
-  is not yet wired into any connection string — that happens once
-  Grafana's datasource provisioning phase lands.
+  has no equivalent in `meshdb_common.connect` since nothing in this repo's
+  own Python code connects as it — its DSN is assembled entirely inside
+  Grafana's own provisioning YAML (`grafana/provisioning/datasources/
+  datasources.yaml`: `url: timescaledb:5432`, `user: grafana_ro`,
+  `secureJsonData.password: ${GRAFANA_DB_PASSWORD}`, that last one
+  expanded by Grafana itself from its container environment, not by any
+  code in this repo).
+- **Every `$node_id` reference in `meshtastic-overview.json` must be cast
+  `::bigint`** (`$node_id::bigint`), never bare — confirmed live, not just
+  suspected: a real node, `2769232366` ("Bukit Cermin Selangor MY_919",
+  above `2**31 - 1`), broke every panel that referenced it with `ERROR:
+  value "2769232366" is out of range for type integer` from Postgres
+  itself. `node_id` is a full uint32 off the wire (up to ~4.29 billion,
+  `metric`/`node_identity` both store it as `BIGINT`), but Grafana's
+  Postgres datasource binds a bare `$node_id` template variable as an
+  `integer` (int4, max ~2.15 billion) query parameter — reproduced
+  directly against a live connection by binding the same value as
+  `::int4` (`psycopg`'s `cur.execute("SELECT %s::int4", (2769232366,))`
+  raises the identical error); binding it `::bigint` instead resolves it,
+  which is what the explicit cast in the SQL text forces Postgres to
+  negotiate regardless of how Grafana's own binding works internally.
+  Every node whose id happened to fall in the upper half of uint32 range
+  was affected, on every panel using `$node_id` — not something specific
+  to one node's data, despite how it first presented ("this one node
+  breaks all the graphs"). `tests/test_grafana_provisioning.py`'s
+  `test_every_node_id_reference_is_cast_to_bigint` regex-scans every
+  panel's `rawSql` for a bare `$node_id` not immediately followed by
+  `::bigint`, and an `integration`-marked test seeds that exact node_id
+  and runs the real panel query through Grafana's API to confirm it still
+  works — a future panel added to this dashboard that filters on
+  `$node_id` needs the same cast, or this class of bug reappears silently
+  (small node_ids "work" throughout development and testing until a real
+  one exceeds int32).
 - **Running `db.py`'s integration test on macOS via colima**: testcontainers'
   default cleanup ("Ryuk") bind-mounts the host Docker socket into its own
   reaper container, which fails under colima specifically (`mkdir
@@ -559,7 +755,14 @@ separate, standalone compose file for a remote host with radio access.
 - Read-only SQL: `grafana_ro` role covers `metric`, `metric_hourly`,
   `metric_daily`, `metric_daily_v`, `node_identity`,
   `node_position_history` (grants cascade onto hypertable chunks and
-  continuous-aggregate internal views automatically).
+  continuous-aggregate internal views automatically). Grafana's own
+  provisioned `timescaledb` datasource connects as this role — see "Where
+  things live" above.
+- Archived Parquet files (any date range past `RAW_RETENTION_INTERVAL`,
+  already dropped from the hot table): query directly via DuckDB's
+  `read_parquet()` against `<ARCHIVE_LOCAL_PATH>/parquet/metric/dt=.../*.parquet`,
+  or through Grafana's provisioned `archive-duckdb` datasource, no running
+  database involved either way.
 - Spatial columns: `geom GEOGRAPHY(Point,4326)` (generated, GiST-indexed)
   on `metric` and `node_position_history` — any PostGIS-aware client
   (QGIS, `ogr2ogr`, DuckDB spatial) can connect directly; no bespoke API
@@ -604,7 +807,9 @@ separate, standalone compose file for a remote host with radio access.
   secrets/ingest_api_token.txt` (matching the value the central
   `ingest-api` instance was actually started with), then `docker compose -f
   docker-compose.gateway-agent.yml up -d` from a checkout of this same repo
-  on that host.
+  on that host. Once up, Grafana is at `http://localhost:3000` (login
+  `admin` / `GF_SECURITY_ADMIN_PASSWORD`), with the `Meshtastic Overview`
+  dashboard already provisioned.
 - Python dev/test setup (for `meshdb_common` and the services, independent
   of the above): `python3 -m venv .venv && .venv/bin/pip install -r
   requirements-dev.txt`, then `.venv/bin/pytest tests/` or `.venv/bin/ruff
@@ -614,12 +819,15 @@ separate, standalone compose file for a remote host with radio access.
   Docker (colima on macOS — see the Ryuk/colima note above) and runs every
   `integration`-marked test (currently `test_db_write_path.py`,
   `test_mqtt_ingest_replay.py`, `test_tcp_poller_replay.py`,
-  `test_archive_job.py`, and one case in `test_ingest_api.py`, all sharing
-  one Postgres container via `_timescaledb_host_port`/`ingest_dsn`/
-  `archive_dsn`) separately from `make test`. `services/archive-job` also
-  needs outbound network access the first time it runs (`INSTALL postgres`/
-  `INSTALL spatial` fetch DuckDB extensions at runtime, not at container
-  build time) — a fully offline environment would need those pre-cached.
+  `test_archive_job.py`, `test_grafana_provisioning.py`, and one case in
+  `test_ingest_api.py`, all sharing one Postgres container via
+  `_timescaledb_host_port`/`ingest_dsn`/`archive_dsn`) separately from
+  `make test`. `services/archive-job` also needs outbound network access
+  the first time it runs (`INSTALL postgres`/`INSTALL spatial` fetch
+  DuckDB extensions at runtime, not at container build time); the
+  `grafana` container needs it on every start (`GF_INSTALL_PLUGINS` fetches
+  the unsigned DuckDB datasource plugin's zip fresh each time, not just
+  once) — a fully offline environment would need both pre-cached.
 - Retention/rollup changes need an explicit `make retune-retention` run,
   not a config reload — `docker-entrypoint-initdb.d` only runs once,
   against an empty volume, so editing `.env` after first init has no

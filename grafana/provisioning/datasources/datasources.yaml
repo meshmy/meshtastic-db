@@ -1,0 +1,34 @@
+apiVersion: 1
+
+datasources:
+  - name: TimescaleDB
+    uid: timescaledb
+    type: postgres
+    access: proxy
+    url: timescaledb:5432
+    database: meshtastic
+    user: grafana_ro
+    isDefault: true
+    editable: false
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: true
+    secureJsonData:
+      password: ${GRAFANA_DB_PASSWORD}
+
+  # Reads archived Parquet files directly off disk — no running database
+  # involved (§6/§7 of the design). `path` empty opens an in-memory DuckDB;
+  # each panel query names the Parquet glob it wants via read_parquet(),
+  # matching the archive layout export_parquet.py writes
+  # (/archive/parquet/metric/dt=<date>/metric_<chunk>.parquet). `initSql`
+  # loads the `spatial` extension so `geom` (GeoParquet, written by
+  # export_parquet.py) can be read back as WKT/WKB in ad hoc queries.
+  - name: Archive (DuckDB)
+    uid: archive-duckdb
+    type: motherduck-duckdb-datasource
+    access: proxy
+    editable: false
+    jsonData:
+      path: ''
+      initSql: 'INSTALL spatial; LOAD spatial;'

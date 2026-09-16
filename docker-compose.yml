@@ -24,9 +24,18 @@ services:
       - timescaledb
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD}
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD}
+      # Unsigned plugin (no official Grafana catalog listing) installed
+      # straight from its GitHub release zip; grafana.ini's
+      # allow_loading_unsigned_plugins is what lets it actually load. Needs
+      # outbound network access on first start (fetched once into the
+      # grafana_data volume, not baked into the image).
+      GF_INSTALL_PLUGINS: https://github.com/motherduckdb/grafana-duckdb-datasource/releases/download/v0.4.5/motherduck-duckdb-datasource-0.4.5.zip;motherduck-duckdb-datasource
     volumes:
       - grafana_data:/var/lib/grafana
+      - ./grafana/grafana.ini:/etc/grafana/grafana.ini:ro
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./archive:/archive:ro
     ports:
       - "3000:3000"
 

@@ -1,0 +1,284 @@
+{
+  "uid": "meshtastic-overview",
+  "title": "Meshtastic Overview",
+  "tags": ["meshtastic"],
+  "timezone": "browser",
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 6,
+  "refresh": "1m",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "region",
+        "type": "query",
+        "label": "Region",
+        "datasource": { "type": "postgres", "uid": "timescaledb" },
+        "query": "SELECT DISTINCT region FROM metric ORDER BY 1",
+        "refresh": 1,
+        "sort": 1
+      },
+      {
+        "name": "node_id",
+        "type": "query",
+        "label": "Node",
+        "datasource": { "type": "postgres", "uid": "timescaledb" },
+        "query": "SELECT node_id AS __value, coalesce(long_name, '0x'||to_hex(node_id)) AS __text FROM node_identity WHERE region = '$region' ORDER BY 2",
+        "refresh": 1,
+        "sort": 1,
+        "includeAll": true,
+        "allValue": "-1",
+        "multi": false
+      },
+      {
+        "name": "device_metrics_field",
+        "type": "query",
+        "hide": 2,
+        "datasource": { "type": "postgres", "uid": "timescaledb" },
+        "query": "SELECT DISTINCT metric_name FROM metric WHERE packet_type = 'Telemetry' AND metric_name LIKE 'device_metrics.%' AND region = '$region' ORDER BY 1",
+        "refresh": 1,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": { "selected": true, "text": "All", "value": "$__all" }
+      },
+      {
+        "name": "environment_metrics_field",
+        "type": "query",
+        "hide": 2,
+        "datasource": { "type": "postgres", "uid": "timescaledb" },
+        "query": "SELECT DISTINCT metric_name FROM metric WHERE packet_type = 'Telemetry' AND metric_name LIKE 'environment_metrics.%' AND region = '$region' ORDER BY 1",
+        "refresh": 1,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": { "selected": true, "text": "All", "value": "$__all" }
+      },
+      {
+        "name": "air_quality_metrics_field",
+        "type": "query",
+        "hide": 2,
+        "datasource": { "type": "postgres", "uid": "timescaledb" },
+        "query": "SELECT DISTINCT metric_name FROM metric WHERE packet_type = 'Telemetry' AND metric_name LIKE 'air_quality_metrics.%' AND region = '$region' ORDER BY 1",
+        "refresh": 1,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": { "selected": true, "text": "All", "value": "$__all" }
+      },
+      {
+        "name": "power_metrics_field",
+        "type": "query",
+        "hide": 2,
+        "datasource": { "type": "postgres", "uid": "timescaledb" },
+        "query": "SELECT DISTINCT metric_name FROM metric WHERE packet_type = 'Telemetry' AND metric_name LIKE 'power_metrics.%' AND region = '$region' ORDER BY 1",
+        "refresh": 1,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": { "selected": true, "text": "All", "value": "$__all" }
+      },
+      {
+        "name": "local_stats_field",
+        "type": "query",
+        "hide": 2,
+        "datasource": { "type": "postgres", "uid": "timescaledb" },
+        "query": "SELECT DISTINCT metric_name FROM metric WHERE packet_type = 'Telemetry' AND metric_name LIKE 'local_stats.%' AND region = '$region' ORDER BY 1",
+        "refresh": 1,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": { "selected": true, "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Device Metrics",
+      "collapsed": true,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "panels": [
+        {
+          "id": 2,
+          "type": "timeseries",
+          "title": "$device_metrics_field",
+          "repeat": "device_metrics_field",
+          "repeatDirection": "v",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 1 },
+          "datasource": { "type": "postgres", "uid": "timescaledb" },
+          "fieldConfig": {
+            "defaults": { "custom": { "drawStyle": "line", "lineInterpolation": "linear", "spanNulls": true, "showPoints": "always" } }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "time_series",
+              "rawSql": "SELECT m.time AS \"time\", coalesce(n.short_name, n.long_name, '0x'||to_hex(m.node_id)) AS metric, m.value_numeric AS value\nFROM metric m\nLEFT JOIN node_identity n ON n.node_id = m.node_id\nWHERE $__timeFilter(m.time)\n  AND m.packet_type = 'Telemetry'\n  AND m.metric_name = '$device_metrics_field'\n  AND m.value_type = 'numeric'\n  AND m.region = '$region'\n  AND ($node_id::bigint = -1 OR m.node_id = $node_id::bigint)\nORDER BY m.time"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "row",
+      "title": "Environment Metrics",
+      "collapsed": true,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 1 },
+      "panels": [
+        {
+          "id": 4,
+          "type": "timeseries",
+          "title": "$environment_metrics_field",
+          "repeat": "environment_metrics_field",
+          "repeatDirection": "v",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 2 },
+          "datasource": { "type": "postgres", "uid": "timescaledb" },
+          "fieldConfig": {
+            "defaults": { "custom": { "drawStyle": "line", "lineInterpolation": "linear", "spanNulls": true, "showPoints": "always" } }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "time_series",
+              "rawSql": "SELECT m.time AS \"time\", coalesce(n.short_name, n.long_name, '0x'||to_hex(m.node_id)) AS metric, m.value_numeric AS value\nFROM metric m\nLEFT JOIN node_identity n ON n.node_id = m.node_id\nWHERE $__timeFilter(m.time)\n  AND m.packet_type = 'Telemetry'\n  AND m.metric_name = '$environment_metrics_field'\n  AND m.value_type = 'numeric'\n  AND m.region = '$region'\n  AND ($node_id::bigint = -1 OR m.node_id = $node_id::bigint)\nORDER BY m.time"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "row",
+      "title": "Air Quality Metrics",
+      "collapsed": true,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 2 },
+      "panels": [
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "$air_quality_metrics_field",
+          "repeat": "air_quality_metrics_field",
+          "repeatDirection": "v",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 3 },
+          "datasource": { "type": "postgres", "uid": "timescaledb" },
+          "fieldConfig": {
+            "defaults": { "custom": { "drawStyle": "line", "lineInterpolation": "linear", "spanNulls": true, "showPoints": "always" } }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "time_series",
+              "rawSql": "SELECT m.time AS \"time\", coalesce(n.short_name, n.long_name, '0x'||to_hex(m.node_id)) AS metric, m.value_numeric AS value\nFROM metric m\nLEFT JOIN node_identity n ON n.node_id = m.node_id\nWHERE $__timeFilter(m.time)\n  AND m.packet_type = 'Telemetry'\n  AND m.metric_name = '$air_quality_metrics_field'\n  AND m.value_type = 'numeric'\n  AND m.region = '$region'\n  AND ($node_id::bigint = -1 OR m.node_id = $node_id::bigint)\nORDER BY m.time"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "row",
+      "title": "Power Metrics",
+      "collapsed": true,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 3 },
+      "panels": [
+        {
+          "id": 8,
+          "type": "timeseries",
+          "title": "$power_metrics_field",
+          "repeat": "power_metrics_field",
+          "repeatDirection": "v",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 4 },
+          "datasource": { "type": "postgres", "uid": "timescaledb" },
+          "fieldConfig": {
+            "defaults": { "custom": { "drawStyle": "line", "lineInterpolation": "linear", "spanNulls": true, "showPoints": "always" } }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "time_series",
+              "rawSql": "SELECT m.time AS \"time\", coalesce(n.short_name, n.long_name, '0x'||to_hex(m.node_id)) AS metric, m.value_numeric AS value\nFROM metric m\nLEFT JOIN node_identity n ON n.node_id = m.node_id\nWHERE $__timeFilter(m.time)\n  AND m.packet_type = 'Telemetry'\n  AND m.metric_name = '$power_metrics_field'\n  AND m.value_type = 'numeric'\n  AND m.region = '$region'\n  AND ($node_id::bigint = -1 OR m.node_id = $node_id::bigint)\nORDER BY m.time"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "row",
+      "title": "Local Stats",
+      "collapsed": true,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 4 },
+      "panels": [
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "$local_stats_field",
+          "repeat": "local_stats_field",
+          "repeatDirection": "v",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 5 },
+          "datasource": { "type": "postgres", "uid": "timescaledb" },
+          "fieldConfig": {
+            "defaults": { "custom": { "drawStyle": "line", "lineInterpolation": "linear", "spanNulls": true, "showPoints": "always" } }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "time_series",
+              "rawSql": "SELECT m.time AS \"time\", coalesce(n.short_name, n.long_name, '0x'||to_hex(m.node_id)) AS metric, m.value_numeric AS value\nFROM metric m\nLEFT JOIN node_identity n ON n.node_id = m.node_id\nWHERE $__timeFilter(m.time)\n  AND m.packet_type = 'Telemetry'\n  AND m.metric_name = '$local_stats_field'\n  AND m.value_type = 'numeric'\n  AND m.region = '$region'\n  AND ($node_id::bigint = -1 OR m.node_id = $node_id::bigint)\nORDER BY m.time"
+            }
+          ]
+        }
+      ]
+    },
+    { "id": 11, "type": "row", "title": "Node Map", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 }, "panels": [] },
+    {
+      "id": 12,
+      "type": "geomap",
+      "title": "Current node positions ($region)",
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 6 },
+      "datasource": { "type": "postgres", "uid": "timescaledb" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT DISTINCT ON (node_id) node_id, latitude, longitude\nFROM metric\nWHERE latitude IS NOT NULL AND region = '$region'\nORDER BY node_id, time DESC"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "geomap",
+      "title": "$node_id track (selected time range)",
+      "description": "Only meaningful for one specific node — empty when \"All\" is selected above.",
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 6 },
+      "datasource": { "type": "postgres", "uid": "timescaledb" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT time AS \"time\", latitude, longitude\nFROM node_position_history\nWHERE $__timeFilter(time) AND node_id = $node_id::bigint\nORDER BY time"
+        }
+      ]
+    },
+    { "id": 14, "type": "row", "title": "Node Detail", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 }, "panels": [] },
+    {
+      "id": 15,
+      "type": "table",
+      "title": "$node_id identity",
+      "description": "Only meaningful for one specific node — empty when \"All\" is selected above; the Node dropdown lists every node by name to pick from.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 17 },
+      "datasource": { "type": "postgres", "uid": "timescaledb" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT node_id, long_name, short_name, hw_model, role, last_heard\nFROM node_identity\nWHERE node_id = $node_id::bigint"
+        }
+      ]
+    }
+  ]
+}
