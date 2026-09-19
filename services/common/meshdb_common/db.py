@@ -10,16 +10,25 @@ on its own.
 Position rows are written before the `metric` insert in the same
 transaction so a Position packet earlier in a batch is already visible to
 the LATERAL join for a later packet in that same batch, from any node.
+
+A numeric field failing its `limits.py` bounds is dropped before insert
+rather than clamped — this is the one choke point every ingestion source
+funnels through (including ingest-api, which never calls decode.py itself),
+so no other module needs its own copy of this check.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from datetime import datetime
 
 import psycopg
 
+from . import limits
 from .envelope import DecodedPacketEnvelope, NodeIdentityUpdate
+
+logger = logging.getLogger("meshdb_common.db")
 
 _INSERT_POSITIONS_SQL = """
 INSERT INTO node_position_history (
@@ -152,7 +161,17 @@ def _write_identities(cur: psycopg.Cursor, envelopes: Sequence[DecodedPacketEnve
 
 
 def _write_metrics(cur: psycopg.Cursor, envelopes: Sequence[DecodedPacketEnvelope]) -> None:
-    rows = [(env, fv) for env in envelopes for fv in env.fields]
+    all_rows = [(env, fv) for env in envelopes for fv in env.fields]
+    rows = [
+        (env, fv)
+        for env, fv in all_rows
+        if fv.value_type != "numeric"
+        or fv.value_numeric is None
+        or limits.value_within_limits(fv.metric_name, fv.value_numeric)
+    ]
+    dropped = len(all_rows) - len(rows)
+    if dropped:
+        logger.warning("dropped %d out-of-range metric value(s)", dropped)
     if not rows:
         return
     cur.execute(

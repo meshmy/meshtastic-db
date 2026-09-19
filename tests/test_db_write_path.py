@@ -195,3 +195,24 @@ def test_metric_dedup_on_conflict_when_same_packet_relayed_twice(conn):
 
     count = conn.execute("SELECT count(*) FROM metric WHERE node_id = %s", (node_id,)).fetchone()[0]
     assert count == 1
+
+
+def test_out_of_range_numeric_field_is_dropped_but_siblings_still_write(conn):
+    node_id = 0x7777
+    packet_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    env = _envelope(
+        time=packet_time,
+        node_id=node_id,
+        packet_id=8,
+        fields=(
+            FieldValue(metric_name="device_metrics.battery_level", value_type="numeric", value_numeric=87.0),
+            FieldValue(metric_name="environment_metrics.temperature", value_type="numeric", value_numeric=3000.0),
+        ),
+    )
+
+    write_envelopes(conn, [env])
+
+    rows = conn.execute(
+        "SELECT metric_name, value_numeric FROM metric WHERE node_id = %s", (node_id,)
+    ).fetchall()
+    assert rows == [("device_metrics.battery_level", 87.0)]
