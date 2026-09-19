@@ -9,5 +9,6 @@ COPY services/archive-job/requirements.txt ./services/archive-job/requirements.t
 RUN pip install --no-cache-dir -r services/archive-job/requirements.txt
 
 COPY services/archive-job/export_parquet.py ./export_parquet.py
+COPY services/archive-job/trim_invalid_metrics.py ./trim_invalid_metrics.py
 
 CMD ["python", "export_parquet.py"]

@@ -80,6 +80,25 @@ waiting for 02:00 UTC:
 docker compose run --rm archive-job python export_parquet.py --once
 ```
 
+## Trimming out-of-range historical values
+
+`meshdb_common/limits.py` defines sensible per-field bounds (percentages,
+temperature, voltage, battery level, and a handful of others — see that
+file to add a new one) and every ingestion service drops a value failing
+them at write time. Rows written *before* that filter existed aren't
+touched automatically; `trim_invalid_metrics.py` is a one-off pass to purge
+them, using the same `archive_rw` role as `export_parquet.py` (`ingest_rw`
+has no DELETE grant on `metric`). Defaults to a dry run:
+
+```bash
+docker compose run --rm archive-job python trim_invalid_metrics.py
+docker compose run --rm archive-job python trim_invalid_metrics.py --execute
+```
+
+Not scheduled — run it once after upgrading to a version with `limits.py`,
+or again after adding a new limits rule that should also apply
+retroactively.
+
 ## Storage backend
 
 `ARCHIVE_BACKEND=local` (default) keeps Parquet files under the
