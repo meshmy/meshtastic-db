@@ -1,0 +1,85 @@
+html,
+body {
+  height: 100%;
+  margin: 0;
+  font-family: "Montserrat", var(--pico-font-family, sans-serif);
+}
+
+#map {
+  position: absolute;
+  inset: 0;
+}
+
+#panel,
+#scrubber-bar {
+  position: absolute;
+  z-index: 1;
+  background: color-mix(in srgb, var(--pico-background-color) 85%, transparent);
+  border-radius: var(--pico-border-radius);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+}
+
+#panel {
+  top: 1rem;
+  left: 1rem;
+  width: 260px;
+  padding: 1rem;
+}
+
+#panel h1 {
+  font-size: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+#panel label {
+  font-size: 0.8rem;
+  margin-top: 0.5rem;
+}
+
+#legend-gradient {
+  height: 10px;
+  border-radius: 4px;
+  margin-top: 0.5rem;
+}
+
+#legend-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  opacity: 0.8;
+}
+
+#node-popup {
+  margin-top: 0.75rem;
+  font-size: 0.85rem;
+}
+
+#scrubber-bar {
+  left: 1rem;
+  right: 1rem;
+  bottom: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 1rem;
+}
+
+#scrubber-bar input[type="range"] {
+  flex: 1;
+  margin: 0;
+}
+
+#play-pause,
+#theme-toggle {
+  border: none;
+  background: transparent;
+  font-size: 1.1rem;
+  cursor: pointer;
+  padding: 0.25rem 0.5rem;
+}
+
+#scrub-time {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}

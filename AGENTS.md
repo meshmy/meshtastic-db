@@ -939,17 +939,34 @@ for a remote host with radio access.
   `docs/gateway-agent.md` cover region configuration and gateway-agent
   deployment in operator-facing depth beyond this file's own summaries
   above.
-- **This repo has no GitHub remote configured yet** (`git remote -v` is
-  empty) — `.github/workflows/*.yml` and `renovate.json` are unverified
-  against real GitHub Actions runs; only their YAML/JSON validity and the
-  local pieces they invoke (`make lint`/`make test`/`make test-integration`/
-  `make smoke-test`/`make proto-gen`/`make update-golden-metrics`, the
-  metric-name-stability test itself) are confirmed. Once a remote exists,
-  still needed before any of this is live: push the repo, add a
-  `RENOVATE_TOKEN` secret (a PAT with repo access, for `renovate.yml`'s
-  self-hosted run), and — in GitHub repo settings, not a file in this tree —
-  enable branch protection on `main` requiring `ci.yml`'s four jobs
-  (`lint`, `test`, `test-integration`, `smoke-test`) and
-  `proto-regen-check.yml` as required status checks, plus enable the native
-  merge queue (so `platformAutomerge: true` in `renovate.json` has a queue
-  to enqueue into).
+- **This repo now has a real GitHub remote**, `meshmy/meshtastic-db` on
+  `main` (both this checkout's and the deploy host's `origin` point at it) —
+  the earlier note that no remote existed is stale. `ci.yml` and
+  `renovate.yml` have both actually run against it; branch protection on
+  `main` is **not** enabled yet (`gh api repos/meshmy/meshtastic-db/branches/main/protection`
+  returns 404), so `ci.yml`'s four jobs and `proto-regen-check.yml` aren't
+  yet required status checks and the merge queue isn't enabled either — the
+  original "still needed" list in this note is still accurate, just not yet
+  done.
+- **Real deployment target**: `192.168.88.10`, host user `andrew`. The
+  actual docker-compose checkout there is a git clone of this same repo at
+  `/home/andrew/docker-compose/meshtastic-db` (kept in sync via `git pull`,
+  not a CI/CD push) — a *different* path from the storage pool. Durable
+  data lives on a separate ZFS pool, wired in via a host-local, **untracked**
+  `docker-compose.override.yml` (not part of this repo) that redirects
+  `timescaledb`'s and `grafana`'s volumes plus `archive-job`'s `./archive`
+  bind mount to `/shelf0pool0/meshtastic-db/{timescaledb,grafana,archive}`.
+  A new service only needs an entry in this repo's own `docker-compose.yml`
+  and a `git pull` + `docker compose up -d --build <service>` on the host —
+  it only needs a `/shelf0pool0` bind mount of its own if it has actual
+  persistent state to keep (most services here don't). Host ports already
+  claimed there: `3000` (grafana), `5432` (timescaledb), `8090` (map-app,
+  see below); `ingest-api`'s `8000` is compose-file-reserved but that
+  service isn't currently running on this host (it's `profiles:
+  ["extra-sources"]`-gated and no `tcp_nodes`/gateway-agent is configured
+  there yet). An unrelated project, **meshatlas** (`meshmy/meshatlas`), also
+  runs on this same host via a separate compose stack
+  (`~/docker-compose/niceplace/docker-compose.yml`, fronted by Traefik at
+  `meshatlas.ndoo.sg`) — it has its own database and ingests directly from a
+  public MQTT broker; it shares nothing with this repo's stack beyond the
+  host machine.

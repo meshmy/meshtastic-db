@@ -32,6 +32,18 @@ def build_archive_dsn() -> str:
     return f"host={host} port={port} dbname={dbname} user=archive_rw password={password}"
 
 
+def build_grafana_ro_dsn() -> str:
+    """Same INGEST_DB_HOST/PORT/NAME as build_ingest_dsn — grafana_ro is the
+    read-only role Grafana's own datasource already connects as (see
+    db/init/50_roles.sh); map-app is the first Python code in this repo to
+    connect as it too."""
+    host = os.environ.get("INGEST_DB_HOST", "timescaledb")
+    port = os.environ.get("INGEST_DB_PORT", "5432")
+    dbname = os.environ.get("INGEST_DB_NAME", "meshtastic")
+    password = resolve_secret("GRAFANA_DB_PASSWORD")
+    return f"host={host} port={port} dbname={dbname} user=grafana_ro password={password}"
+
+
 def connect_with_retry(dsn: str, *, timeout: float = 60.0) -> psycopg.Connection:
     """Container start order isn't the same as "ready to accept
     connections" — retry rather than crash-loop while Postgres finishes

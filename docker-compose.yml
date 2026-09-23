@@ -99,6 +99,21 @@ services:
     secrets:
       - ingest_api_token
 
+  map-app:
+    build:
+      context: .
+      dockerfile: services/map-app/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - timescaledb
+    environment:
+      INGEST_DB_HOST: timescaledb
+      INGEST_DB_PORT: 5432
+      INGEST_DB_NAME: meshtastic
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD}
+    ports:
+      - "8090:8000"
+
   archive-job:
     build:
       context: .

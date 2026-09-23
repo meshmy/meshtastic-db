@@ -103,6 +103,16 @@ def archive_dsn(_timescaledb_host_port):
     return f"host={host} port={port} dbname=meshtastic user=archive_rw password={ARCHIVE_DB_PASSWORD}"
 
 
+@pytest.fixture(scope="session")
+def grafana_ro_dsn(_timescaledb_host_port):
+    """A DSN against the shared test container that connects as
+    `grafana_ro` — the same read-only role Grafana's own datasource and
+    map-app both use, so a test using this fixture also exercises
+    50_roles.sh's actual grants rather than just the schema SQL."""
+    host, port = _timescaledb_host_port
+    return f"host={host} port={port} dbname=meshtastic user=grafana_ro password={GRAFANA_DB_PASSWORD}"
+
+
 def _wait_until_mqtt_ready(host: str, port: int, timeout: float = 60.0) -> None:
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None

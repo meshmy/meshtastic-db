@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Meshtastic Telemetry Map</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4/dist/maplibre-gl.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/style.css?v=1" />
+  </head>
+  <body>
+    <div id="map"></div>
+
+    <aside id="panel">
+      <h1>Meshtastic Telemetry</h1>
+      <label for="region-select">Region</label>
+      <select id="region-select"></select>
+      <label for="metric-select">Overlay</label>
+      <select id="metric-select"></select>
+      <div id="legend">
+        <div id="legend-gradient"></div>
+        <div id="legend-labels">
+          <span id="legend-min"></span>
+          <span id="legend-max"></span>
+        </div>
+      </div>
+      <div id="node-popup" hidden>
+        <strong id="popup-name"></strong>
+        <div id="popup-meta"></div>
+      </div>
+    </aside>
+
+    <div id="scrubber-bar">
+      <button id="play-pause" type="button" aria-label="Play">▶</button>
+      <input id="scrub-range" type="range" min="0" max="1" value="1" step="1" />
+      <span id="scrub-time"></span>
+      <button id="theme-toggle" type="button" aria-label="Toggle theme">🖥</button>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4/dist/maplibre-gl.js"></script>
+    <script type="module" src="/js/app.js?v=1"></script>
+  </body>
+</html>
