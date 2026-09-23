@@ -153,8 +153,16 @@ def archive_root():
     reason as `mosquitto_broker`'s conf dir above. Starts empty; a test
     populates it with a real archive-job export after the container is
     already running (a live bind mount, so newly written files are visible
-    inside the container with no restart needed)."""
+    inside the container with no restart needed).
+
+    tempfile.mkdtemp() always creates its directory 0700 (owner-only) — the
+    Grafana container runs as a non-root uid (472) that doesn't own this
+    host directory, so without loosening permissions it can't even traverse
+    into it to see files the archive-job export later writes, surfacing as
+    a spurious "no files match" from its DuckDB datasource instead of a
+    permission error."""
     root = Path(tempfile.mkdtemp(prefix=".grafana-archive-test-", dir=REPO_ROOT))
+    root.chmod(0o755)
     try:
         yield root
     finally:
