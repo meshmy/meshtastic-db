@@ -1,24 +1,44 @@
 import { buildRampLUT } from "./colorScale.js";
 
-const EARTH_RADIUS_KM = 6371;
-const KM_PER_DEGREE_LAT = (Math.PI / 180) * EARTH_RADIUS_KM;
+// [zoom, screen-pixel radius] control points, linearly interpolated and
+// clamped at the ends. A fixed real-world radius (e.g. "3km") looks right
+// zoomed into a city block but is imperceptible at a whole-country view —
+// this instead targets a radius that stays clearly visible at any zoom the
+// app actually shows, growing at low zoom rather than shrinking with the
+// geography, and growing further at high zoom for a more sensor-local feel.
+const DEFAULT_RADIUS_STOPS = [
+  [0, 80],
+  [4, 120],
+  [6, 160],
+  [9, 200],
+  [12, 240],
+  [16, 300],
+];
 
-function kmPerDegreeLon(latDeg) {
-  return (Math.PI / 180) * EARTH_RADIUS_KM * Math.cos((latDeg * Math.PI) / 180);
+function interpolateStops(x, stops) {
+  if (x <= stops[0][0]) return stops[0][1];
+  const last = stops[stops.length - 1];
+  if (x >= last[0]) return last[1];
+  for (let i = 0; i < stops.length - 1; i++) {
+    const [x0, y0] = stops[i];
+    const [x1, y1] = stops[i + 1];
+    if (x >= x0 && x <= x1) return y0 + ((y1 - y0) * (x - x0)) / (x1 - x0);
+  }
+  return last[1];
 }
 
 // A continuous "field" of the selected telemetry value, in the style of a
 // weather-map overlay (zoom.earth/earth.nullschool) — each node's value
-// blends smoothly into its neighbors within a fixed real-world radius,
-// rather than MapLibre's native `heatmap` layer, which sums point density
-// and can't represent "this node's own value" once points are close
-// together. Rendered as a small offscreen canvas, georeferenced onto the
-// map via a `canvas` source (MapLibre re-samples it as a raster layer),
-// redrawn whenever the camera moves or the data changes.
+// blends smoothly into its neighbors within a radius, rather than
+// MapLibre's native `heatmap` layer, which sums point density and can't
+// represent "this node's own value" once points are close together.
+// Rendered as a small offscreen canvas, georeferenced onto the map via a
+// `canvas` source (MapLibre re-samples it as a raster layer), redrawn
+// whenever the camera moves or the data changes.
 export class FieldOverlay {
-  constructor(map, { radiusKm = 3, resolution = 96, maxOpacity = 0.75 } = {}) {
+  constructor(map, { radiusStops = DEFAULT_RADIUS_STOPS, resolution = 96, maxOpacity = 0.85 } = {}) {
     this.map = map;
-    this.radiusKm = radiusKm;
+    this.radiusStops = radiusStops;
     this.maxOpacity = maxOpacity;
     this.sourceId = "map-app-field";
     this.layerId = "map-app-field-layer";
@@ -117,14 +137,15 @@ export class FieldOverlay {
     const south = bounds.getSouth();
     const lonSpan = east - west || 1e-9;
     const latSpan = north - south || 1e-9;
-    const centerLat = (north + south) / 2;
 
-    // Real-world radius converted to this frame's canvas-pixel space, so
-    // the blob covers the same ground area at any zoom level rather than
-    // a fixed screen size.
-    const radiusPxX = (this.radiusKm / kmPerDegreeLon(centerLat)) * (width / lonSpan);
-    const radiusPxY = (this.radiusKm / KM_PER_DEGREE_LAT) * (height / latSpan);
-    const radiusPx = (radiusPxX + radiusPxY) / 2;
+    // The radius is chosen in on-screen CSS pixels (see DEFAULT_RADIUS_STOPS)
+    // then converted into this canvas's own (smaller) pixel space, since
+    // this canvas is stretched by MapLibre to fill the actual map container.
+    const container = this.map.getContainer();
+    const screenRadiusPx = interpolateStops(this.map.getZoom(), this.radiusStops);
+    const scaleX = width / (container.clientWidth || width);
+    const scaleY = height / (container.clientHeight || height);
+    const radiusPx = screenRadiusPx * ((scaleX + scaleY) / 2);
 
     const points = this.points.map((p) => ({
       t: p.t,
@@ -145,9 +166,11 @@ export class FieldOverlay {
           const dy = y - p.py;
           const dist = Math.sqrt(dx * dx + dy * dy);
           if (dist >= radiusPx) continue;
-          // Smooth falloff to exactly 0 at the radius edge, rather than a
-          // hard cutoff, so blobs fade out instead of clipping.
-          const w = (1 - dist / radiusPx) ** 2;
+          // Linear falloff to exactly 0 at the radius edge, rather than a
+          // hard cutoff (so blobs fade out instead of clipping) or a
+          // steeper curve (which would leave most of the radius faint,
+          // with only a small bright core near each point).
+          const w = 1 - dist / radiusPx;
           weightSum += w;
           tSum += w * p.t;
         }

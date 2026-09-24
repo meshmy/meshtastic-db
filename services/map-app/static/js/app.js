@@ -4,7 +4,7 @@ import { ThemeController } from "./theme.js";
 import { NodeLayers } from "./layers.js";
 import { FieldOverlay } from "./field.js";
 import { Playback } from "./playback.js";
-import { MAP_STYLES, DEFAULT_RANGE_SECONDS, PLAYBACK_DURATION_MS, FIELD_RADIUS_KM } from "./config.js";
+import { MAP_STYLES, DEFAULT_RANGE_SECONDS, PLAYBACK_DURATION_MS } from "./config.js";
 
 // West Malaysia (Langkawi/Perlis to Johor) union East Malaysia (Sabah's
 // eastern tip in Borneo) — the map's fixed default view. Regions don't
@@ -210,7 +210,7 @@ scrubRange.addEventListener("input", () => {
 map.on("load", async () => {
   // field's canvas/raster layer is added first so it paints beneath the
   // node markers/labels NodeLayers adds next.
-  field = new FieldOverlay(map, { radiusKm: FIELD_RADIUS_KM });
+  field = new FieldOverlay(map);
   layers = new NodeLayers(map, theme);
   layers.onHover = showPopup;
   layers.onSelect = showPopup;
