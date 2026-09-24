@@ -1,8 +1,9 @@
-// Per-metric color ramps. Domains are fixed, not auto-scaled from whatever
-// range happens to be fetched, so the legend doesn't jump every time the
-// user changes the time window. Temperature is the one metric with a
-// physically meaningful zero, so it gets a diverging ramp; everything else
-// here is a sequential "badness gradient" with no meaningful center.
+// Per-metric color ramps, shared by the heatmap layer's color scale and the
+// legend. Domains are fixed, not auto-scaled from whatever range happens to
+// be fetched, so the legend doesn't jump every time the user changes the
+// time window. Temperature is the one metric with a physically meaningful
+// zero, so it gets a diverging ramp; everything else here is a sequential
+// "badness gradient" with no meaningful center.
 const METRIC_COLOR_CONFIG = {
   "environment_metrics.temperature": {
     type: "diverging",
@@ -28,40 +29,6 @@ const METRIC_COLOR_CONFIG = {
 
 const DEFAULT_COLORS = ["#33608c", "#4fa39a", "#f2c14e"];
 
-export const STALE_COLOR = "#6b7684";
-
-function hexToRgb(hex) {
-  const n = parseInt(hex.slice(1), 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-}
-
-function rgbToHex([r, g, b]) {
-  return (
-    "#" +
-    [r, g, b]
-      .map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0"))
-      .join("")
-  );
-}
-
-function lerp(a, b, t) {
-  return a + (b - a) * t;
-}
-
-function interpolateStops(value, domain, colors) {
-  if (value <= domain[0]) return colors[0];
-  if (value >= domain[domain.length - 1]) return colors[colors.length - 1];
-  for (let i = 0; i < domain.length - 1; i++) {
-    if (value >= domain[i] && value <= domain[i + 1]) {
-      const t = (value - domain[i]) / (domain[i + 1] - domain[i]);
-      const c0 = hexToRgb(colors[i]);
-      const c1 = hexToRgb(colors[i + 1]);
-      return rgbToHex(c0.map((v, idx) => lerp(v, c1[idx], t)));
-    }
-  }
-  return colors[colors.length - 1];
-}
-
 // `observedDomain` (a [min, max] pair computed from the currently fetched
 // playback payload) only matters for a metric with no configured ramp.
 export function configFor(metricName, observedDomain) {
@@ -72,8 +39,14 @@ export function configFor(metricName, observedDomain) {
   return { type: "sequential", domain: [lo, (lo + hi) / 2, hi], colors: DEFAULT_COLORS };
 }
 
-export function colorFor(metricName, value, observedDomain) {
-  if (value === null || value === undefined) return STALE_COLOR;
+// Maps a value onto [0, 1] against the metric's configured/observed domain
+// for use as a heatmap layer's per-point weight — 0 (no contribution) for
+// a missing/stale value rather than an arbitrary in-range default.
+export function normalize(value, metricName, observedDomain) {
+  if (value === null || value === undefined) return 0;
   const config = configFor(metricName, observedDomain);
-  return interpolateStops(value, config.domain, config.colors);
+  const lo = config.domain[0];
+  const hi = config.domain[config.domain.length - 1];
+  if (hi <= lo) return 0;
+  return Math.max(0, Math.min(1, (value - lo) / (hi - lo)));
 }
