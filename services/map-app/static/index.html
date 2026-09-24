@@ -6,6 +6,7 @@
     <title>Meshtastic Telemetry Map</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" />
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4/dist/maplibre-gl.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/css/materialdesignicons.min.css" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -37,10 +38,14 @@
     </aside>
 
     <div id="scrubber-bar">
-      <button id="play-pause" type="button" aria-label="Play">▶</button>
+      <button id="play-pause" type="button" aria-label="Play">
+        <span class="mdi mdi-play" aria-hidden="true"></span>
+      </button>
       <input id="scrub-range" type="range" min="0" max="1" value="1" step="1" />
       <span id="scrub-time"></span>
-      <button id="theme-toggle" type="button" aria-label="Toggle theme">🖥</button>
+      <button id="theme-toggle" type="button" aria-label="Toggle theme">
+        <span class="mdi mdi-monitor" aria-hidden="true"></span>
+      </button>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4/dist/maplibre-gl.js"></script>

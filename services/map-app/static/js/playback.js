@@ -58,6 +58,15 @@ export class Playback {
   play(onFrame, durationMs) {
     this.playing = true;
     this._lastFrameMs = null;
+    // Starting playback while parked at `end` (the default view) would
+    // otherwise overflow past `end` on the very first advancing frame and
+    // wrap to `start` almost immediately, reading as a jarring reset
+    // rather than a smooth play — jump to `start` synchronously instead so
+    // the loop always has room to advance forward from here.
+    if (this.current >= this.end) {
+      this.current = this.start;
+      onFrame(this.current);
+    }
     const step = (nowMs) => {
       if (!this.playing) return;
       if (this._lastFrameMs !== null) {

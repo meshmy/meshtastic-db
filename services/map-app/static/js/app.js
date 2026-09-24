@@ -40,13 +40,15 @@ const map = new maplibregl.Map({
   zoom: 1.5,
 });
 
-function themeIcon() {
-  if (theme.mode === "system") return "🖥";
-  return theme.mode === "dark" ? "🌙" : "☀";
+const THEME_ICON_CLASS = { system: "mdi-monitor", dark: "mdi-weather-night", light: "mdi-white-balance-sunny" };
+const themeIconEl = themeToggleButton.querySelector(".mdi");
+
+function setIcon(el, iconName) {
+  el.className = `mdi ${iconName}`;
 }
 
 function updateThemeButton() {
-  themeToggleButton.textContent = themeIcon();
+  setIcon(themeIconEl, THEME_ICON_CLASS[theme.mode]);
   themeToggleButton.title = `Theme: ${theme.mode}`;
 }
 
@@ -79,7 +81,13 @@ function render(t) {
   }
   layers.setData(frame);
   scrubRange.value = String(Math.round(t));
-  scrubTime.textContent = new Date(t * 1000).toLocaleString();
+  scrubTime.textContent = new Date(t * 1000).toLocaleString(undefined, {
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function updateLegend() {
@@ -113,22 +121,50 @@ async function loadPlayback(region, metric) {
   render(end);
 }
 
+function median(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+// A single node with a bad/never-fixed GPS reading can sit thousands of km
+// from the rest of a mesh (normally LoRa-range — tens of km at most).
+// Fitting the camera to every node unconditionally lets one outlier zoom
+// the map out to a near-world view, making the real markers imperceptible.
+// This only affects the initial camera framing — the outlier node still
+// renders wherever it actually reports.
+function withoutPositionOutliers(nodes) {
+  if (nodes.length <= 2) return nodes;
+  const medianLat = median(nodes.map((n) => n.position.lat));
+  const medianLon = median(nodes.map((n) => n.position.lon));
+  const distances = nodes.map((n) => Math.hypot(n.position.lat - medianLat, n.position.lon - medianLon));
+  const threshold = Math.max(median(distances) * 5, 1.0);
+  const kept = nodes.filter((_, i) => distances[i] <= threshold);
+  return kept.length > 0 ? kept : nodes;
+}
+
 function fitToNodes(nodes) {
   const withPosition = nodes.filter((n) => n.position);
   if (withPosition.length === 0) return;
   const bounds = new maplibregl.LngLatBounds();
-  for (const node of withPosition) {
+  for (const node of withoutPositionOutliers(withPosition)) {
     bounds.extend([node.position.lon, node.position.lat]);
   }
   map.fitBounds(bounds, { padding: 80, maxZoom: 12, duration: 500 });
 }
 
+const playIconEl = playPauseButton.querySelector(".mdi");
+
+function setPlaying(isPlaying) {
+  setIcon(playIconEl, isPlaying ? "mdi-pause" : "mdi-play");
+  playPauseButton.setAttribute("aria-label", isPlaying ? "Pause" : "Play");
+}
+
 async function loadRegion(region) {
   if (playback) playback.pause();
-  playPauseButton.textContent = "▶";
+  setPlaying(false);
   const [nodesPayload, metricsPayload] = await Promise.all([fetchNodes(region), fetchMetrics(region)]);
   nodesById = new Map(nodesPayload.nodes.map((n) => [n.node_id, n]));
-  fitToNodes(nodesPayload.nodes);
 
   metricSelect.innerHTML = "";
   for (const name of metricsPayload.metrics) {
@@ -137,12 +173,21 @@ async function loadRegion(region) {
     option.textContent = name;
     metricSelect.appendChild(option);
   }
-  currentMetric = metricsPayload.metrics[0] || null;
+  // Keep the previously selected overlay across a region change when the
+  // new region also has it, rather than always resetting to the first one.
+  const keepCurrent = currentMetric && metricsPayload.metrics.includes(currentMetric);
+  currentMetric = keepCurrent ? currentMetric : metricsPayload.metrics[0] || null;
   if (currentMetric) {
     metricSelect.value = currentMetric;
+    // Fit the camera after the node source already holds real data, so the
+    // fly-to lands on the view the markers actually appear in rather than
+    // animating toward a frame computed the instant before the first
+    // playback response arrived.
     await loadPlayback(region, currentMetric);
+    fitToNodes(nodesPayload.nodes);
   } else if (layers) {
     layers.setData({ type: "FeatureCollection", features: [] });
+    fitToNodes(nodesPayload.nodes);
   }
 }
 
@@ -156,9 +201,9 @@ playPauseButton.addEventListener("click", () => {
   if (!playback) return;
   if (playback.playing) {
     playback.pause();
-    playPauseButton.textContent = "▶";
+    setPlaying(false);
   } else {
-    playPauseButton.textContent = "⏸";
+    setPlaying(true);
     playback.play(render, PLAYBACK_DURATION_MS);
   }
 });
@@ -166,7 +211,7 @@ playPauseButton.addEventListener("click", () => {
 scrubRange.addEventListener("input", () => {
   if (!playback) return;
   playback.pause();
-  playPauseButton.textContent = "▶";
+  setPlaying(false);
   playback.seek(Number(scrubRange.value));
   render(playback.current);
 });

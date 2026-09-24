@@ -74,6 +74,13 @@ export class NodeLayers {
         type: "symbol",
         source: SOURCE_ID,
         layout: {
+          // OpenFreeMap's styles only actually serve the "Noto Sans ..."
+          // font stacks (verified against its style JSON's own glyphs
+          // usage) — the spec's default text-font ("Open Sans Regular,
+          // Arial Unicode MS Regular") 404s against its glyphs endpoint,
+          // and that failure was found to stall this whole source's tile
+          // pipeline, silently hiding the circle layer sharing it too.
+          "text-font": ["Noto Sans Regular"],
           "text-field": ["get", "label"],
           "text-size": 11,
           "text-offset": [0, 1.2],

@@ -64,18 +64,36 @@ body {
   padding: 0.5rem 1rem;
 }
 
+/* Pico gives form elements a block display and bottom margin meant for
+   stacked forms — reset both so align-items: center on the row above
+   actually lines everything up on one baseline. */
+#scrubber-bar > * {
+  display: inline-flex;
+  align-items: center;
+  margin: 0;
+  width: auto;
+}
+
 #scrubber-bar input[type="range"] {
   flex: 1;
-  margin: 0;
 }
 
 #play-pause,
 #theme-toggle {
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
   border: none;
   background: transparent;
-  font-size: 1.1rem;
   cursor: pointer;
-  padding: 0.25rem 0.5rem;
+  padding: 0;
+  flex: none;
+}
+
+#play-pause .mdi,
+#theme-toggle .mdi {
+  font-size: 1.25rem;
+  line-height: 1;
 }
 
 #scrub-time {
