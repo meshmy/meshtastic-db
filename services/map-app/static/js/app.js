@@ -2,8 +2,9 @@ import { fetchRegions, fetchNodes, fetchMetrics, fetchPlayback } from "./api.js"
 import { configFor, normalize } from "./colorScale.js";
 import { ThemeController } from "./theme.js";
 import { NodeLayers } from "./layers.js";
+import { FieldOverlay } from "./field.js";
 import { Playback } from "./playback.js";
-import { MAP_STYLES, DEFAULT_RANGE_SECONDS, PLAYBACK_DURATION_MS } from "./config.js";
+import { MAP_STYLES, DEFAULT_RANGE_SECONDS, PLAYBACK_DURATION_MS, FIELD_RADIUS_KM } from "./config.js";
 
 // West Malaysia (Langkawi/Perlis to Johor) union East Malaysia (Sabah's
 // eastern tip in Borneo) — the map's fixed default view. Regions don't
@@ -29,6 +30,7 @@ const popupMeta = document.getElementById("popup-meta");
 
 let nodesById = new Map();
 let layers = null;
+let field = null;
 let playback = null;
 let observedDomain = [0, 1];
 let currentMetric = null;
@@ -36,16 +38,16 @@ let currentMetric = null;
 // Constructing ThemeController before the map only sets the `data-theme`
 // dataset attribute (used for the initial style pick below) — its
 // onChange callback isn't invoked until a later cycle()/OS-preference
-// change, by which point `map`/`layers` are already assigned.
+// change, by which point `map`/`layers`/`field` are already assigned.
 const theme = new ThemeController((resolved) => {
   map.setStyle(MAP_STYLES[resolved]);
   map.once("idle", () => {
-    if (!layers) return;
+    if (!layers || !field) return;
     // A style swap wipes every programmatically added source/layer —
-    // reattach() rebuilds them, but the heatmap comes back on its
-    // placeholder color and the source comes back empty until the current
-    // frame is re-applied.
+    // reattach() rebuilds them, but the source/canvas come back empty
+    // until the current frame is re-applied.
     layers.reattach(theme);
+    field.reattach();
     updateLegend();
     if (playback) render(playback.current);
   });
@@ -89,15 +91,22 @@ function showPopup(properties) {
 }
 
 function render(t) {
-  if (!playback || !layers) return;
+  if (!playback || !layers || !field) return;
   const frame = playback.frameAt(t);
+  const fieldPoints = [];
   for (const feature of frame.features) {
     const node = nodesById.get(feature.properties.node_id);
     feature.properties.label = (node && node.short_name) || `!${feature.properties.node_id.toString(16)}`;
-    feature.properties.heatWeight = normalize(feature.properties.value, currentMetric, observedDomain);
     feature.properties.opacity = feature.properties.value === null ? 0.4 : 0.9;
+    // A node with no value at this instant contributes nothing to the
+    // field, rather than pulling the blend toward the ramp's cold end.
+    if (feature.properties.value !== null) {
+      const [lon, lat] = feature.geometry.coordinates;
+      fieldPoints.push({ lon, lat, t: normalize(feature.properties.value, currentMetric, observedDomain) });
+    }
   }
   layers.setData(frame);
+  field.setFeatures(fieldPoints);
   scrubRange.value = String(Math.round(t));
   scrubTime.textContent = new Date(t * 1000).toLocaleString(undefined, {
     year: "numeric",
@@ -113,7 +122,7 @@ function updateLegend() {
   legendGradient.style.background = `linear-gradient(to right, ${config.colors.join(",")})`;
   legendMin.textContent = config.domain[0].toFixed(1);
   legendMax.textContent = config.domain[config.domain.length - 1].toFixed(1);
-  if (layers) layers.setHeatmapColors(config.colors);
+  if (field) field.setColors(config.colors);
 }
 
 function computeObservedDomain(payload) {
@@ -169,6 +178,7 @@ async function loadRegion(region) {
     await loadPlayback(region, currentMetric);
   } else if (layers) {
     layers.setData({ type: "FeatureCollection", features: [] });
+    if (field) field.setFeatures([]);
   }
 }
 
@@ -198,6 +208,9 @@ scrubRange.addEventListener("input", () => {
 });
 
 map.on("load", async () => {
+  // field's canvas/raster layer is added first so it paints beneath the
+  // node markers/labels NodeLayers adds next.
+  field = new FieldOverlay(map, { radiusKm: FIELD_RADIUS_KM });
   layers = new NodeLayers(map, theme);
   layers.onHover = showPopup;
   layers.onSelect = showPopup;
