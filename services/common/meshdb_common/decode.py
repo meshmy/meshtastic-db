@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from google.protobuf.descriptor import FieldDescriptor
@@ -258,9 +258,9 @@ def decode_mesh_packet(
     decryption/parsing fails."""
     from_node = getattr(packet, "from")
     rx_time = (
-        datetime.fromtimestamp(packet.rx_time, tz=timezone.utc)
+        datetime.fromtimestamp(packet.rx_time, tz=UTC)
         if packet.rx_time
-        else datetime.now(tz=timezone.utc)
+        else datetime.now(tz=UTC)
     )
     common_kwargs = {
         "time": rx_time,

@@ -18,7 +18,7 @@ silently forking a metric_name.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import meshdb_common  # noqa: F401  (side effect: puts generated/ on sys.path)
@@ -29,7 +29,7 @@ PortNum = portnums_pb2.PortNum
 GOLDEN_PATH = Path(__file__).parent / "fixtures" / "known_metrics_golden.json"
 
 _COMMON_KWARGS = {
-    "time": datetime(2024, 1, 1, tzinfo=timezone.utc),
+    "time": datetime(2024, 1, 1, tzinfo=UTC),
     "node_id": 1,
     "region": "TEST",
     "source": "test",

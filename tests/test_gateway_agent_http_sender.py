@@ -10,7 +10,7 @@ import importlib.util
 import json
 import sys
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -32,7 +32,7 @@ def _envelope(node_id: int):
     from meshdb_common.envelope import DecodedPacketEnvelope, FieldValue
 
     return DecodedPacketEnvelope(
-        time=datetime.now(tz=timezone.utc),
+        time=datetime.now(tz=UTC),
         node_id=node_id,
         region="MY_919",
         source="serial",

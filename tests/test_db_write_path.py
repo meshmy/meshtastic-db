@@ -8,7 +8,7 @@ grants that db/init/50_roles.sh actually creates, not just the SQL."""
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 import pytest
@@ -61,7 +61,7 @@ def _envelope(
 
 def test_metric_row_lands_with_null_position_when_node_never_reported_one(conn):
     env = _envelope(
-        time=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        time=datetime(2026, 1, 1, tzinfo=UTC),
         node_id=0x1111,
         fields=(FieldValue(metric_name="device_metrics.battery_level", value_type="numeric", value_numeric=88.0),),
     )
@@ -75,7 +75,7 @@ def test_metric_row_lands_with_null_position_when_node_never_reported_one(conn):
 
 def test_position_written_before_metric_resolves_in_same_batch(conn):
     node_id = 0x2222
-    position_time = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    position_time = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
     metric_time = position_time + timedelta(minutes=5)
     envelopes = [
         _envelope(
@@ -110,9 +110,9 @@ def test_position_written_before_metric_resolves_in_same_batch(conn):
 
 def test_position_as_of_join_picks_earlier_position_not_later(conn):
     node_id = 0x3333
-    earlier = datetime(2026, 1, 1, 8, 0, tzinfo=timezone.utc)
-    later = datetime(2026, 1, 1, 16, 0, tzinfo=timezone.utc)
-    between = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    earlier = datetime(2026, 1, 1, 8, 0, tzinfo=UTC)
+    later = datetime(2026, 1, 1, 16, 0, tzinfo=UTC)
+    between = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
 
     write_envelopes(
         conn,
@@ -144,7 +144,7 @@ def test_position_as_of_join_picks_earlier_position_not_later(conn):
 
 def test_identity_upsert_within_one_batch_keeps_latest_by_time(conn):
     node_id = 0x4444
-    older = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    older = datetime(2026, 1, 1, tzinfo=UTC)
     newer = older + timedelta(hours=1)
 
     write_envelopes(
@@ -165,7 +165,7 @@ def test_identity_upsert_within_one_batch_keeps_latest_by_time(conn):
 
 def test_identity_upsert_across_batches_latest_wins(conn):
     node_id = 0x5555
-    first = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    first = datetime(2026, 1, 1, tzinfo=UTC)
     second = first + timedelta(hours=1)
 
     write_envelopes(conn, [_envelope(time=first, node_id=node_id, packet_type="User", portnum=4, packet_id=1,
@@ -179,7 +179,7 @@ def test_identity_upsert_across_batches_latest_wins(conn):
 
 def test_metric_dedup_on_conflict_when_same_packet_relayed_twice(conn):
     node_id = 0x6666
-    packet_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    packet_time = datetime(2026, 1, 1, tzinfo=UTC)
     field = FieldValue(metric_name="device_metrics.battery_level", value_type="numeric", value_numeric=42.0)
 
     # Same packet_id/time/node_id/metric_name relayed by two MQTT gateways,
@@ -199,7 +199,7 @@ def test_metric_dedup_on_conflict_when_same_packet_relayed_twice(conn):
 
 def test_out_of_range_numeric_field_is_dropped_but_siblings_still_write(conn):
     node_id = 0x7777
-    packet_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    packet_time = datetime(2026, 1, 1, tzinfo=UTC)
     env = _envelope(
         time=packet_time,
         node_id=node_id,

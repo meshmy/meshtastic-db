@@ -3,13 +3,13 @@ decrypt — exercised via synthetic messages built in-process (no real
 device/broker traffic; that's the corpus-replay test once mqtt-ingest and a
 live database exist)."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from meshdb_common.decode import decode_data, decode_service_envelope, resolve_psk
 from meshtastic import mesh_pb2, mqtt_pb2, portnums_pb2, telemetry_pb2
 
 COMMON_KWARGS = {
-    "time": datetime(2026, 1, 1, tzinfo=timezone.utc),
+    "time": datetime(2026, 1, 1, tzinfo=UTC),
     "node_id": 0x1234,
     "region": "MY_919",
     "source": "mqtt",
