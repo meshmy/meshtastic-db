@@ -23,7 +23,7 @@ import importlib.util
 import json
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import psycopg
@@ -288,7 +288,7 @@ def _panel_sql_for_field(variant: str, *, region: str, node_id: int, metric_name
 
 
 def _seed_two_nodes_temperature(ingest_dsn: str, region: str, node_a: int, node_b: int) -> None:
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     with psycopg.connect(ingest_dsn) as conn:
         write_envelopes(
             conn,
@@ -325,7 +325,7 @@ def _seed_two_nodes_temperature(ingest_dsn: str, region: str, node_a: int, node_
 @pytest.mark.integration
 def test_grafana_dashboard_panel_renders_against_seeded_data(grafana_base_url, grafana_auth, ingest_dsn):
     node_id = 0xC3C3
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     with psycopg.connect(ingest_dsn) as conn:
         write_envelopes(
             conn,
@@ -401,7 +401,7 @@ def test_grafana_panel_query_works_for_a_node_id_above_int32_max(grafana_base_ur
     exact step."""
     region = "MY_919"
     node_id = 2769232366  # real value from the field report, > 2**31 - 1
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     with psycopg.connect(ingest_dsn) as conn:
         write_envelopes(
             conn,
@@ -438,7 +438,7 @@ def test_grafana_field_variable_lists_only_metric_names_actually_present(grafana
     clause happens to reference the right variable name."""
     region = "MY_919"
     node_id = 0xE9E9
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     with psycopg.connect(ingest_dsn) as conn:
         write_envelopes(
             conn,
@@ -476,7 +476,7 @@ def test_grafana_duckdb_datasource_queries_an_archived_parquet_file(
 ):
     export_parquet = _load_export_parquet()
     node_id = 0xD4D4
-    old_time = datetime(2019, 1, 1, tzinfo=timezone.utc)
+    old_time = datetime(2019, 1, 1, tzinfo=UTC)
     with psycopg.connect(ingest_dsn) as ingest_conn:
         write_envelopes(
             ingest_conn,
