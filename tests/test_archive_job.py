@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import psycopg
@@ -51,8 +51,8 @@ run_once = export_parquet.run_once
 # of which also insert historical (already-aged-by-now) rows, so a chunk
 # is identified by its own date rather than by a global count or ordering
 # assumption, and each test uses a date no other test touches.
-OLD_TIME_1 = datetime(2020, 6, 15, 12, 0, tzinfo=timezone.utc)
-OLD_TIME_2 = datetime(2020, 3, 10, 9, 0, tzinfo=timezone.utc)
+OLD_TIME_1 = datetime(2020, 6, 15, 12, 0, tzinfo=UTC)
+OLD_TIME_2 = datetime(2020, 3, 10, 9, 0, tzinfo=UTC)
 
 
 @pytest.fixture

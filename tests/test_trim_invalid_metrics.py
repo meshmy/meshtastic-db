@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import psycopg
@@ -48,7 +48,7 @@ def _load_trim_invalid_metrics():
 trim_invalid_metrics = _load_trim_invalid_metrics()
 trim = trim_invalid_metrics.trim
 
-PACKET_TIME = datetime(2026, 1, 1, tzinfo=timezone.utc)
+PACKET_TIME = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 @pytest.fixture

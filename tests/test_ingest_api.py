@@ -8,6 +8,7 @@ works end to end, not just that the two pieces are wired together."""
 from __future__ import annotations
 
 import importlib.util
+from datetime import UTC
 from pathlib import Path
 
 import psycopg
@@ -45,13 +46,13 @@ class _FakeConn:
 
 
 def _envelope(*, region: str, node_id: int = 0x1234, packet_id: int = 1, battery_level: float = 55.0) -> dict:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from meshdb_common.envelope import DecodedPacketEnvelope, FieldValue
 
     return envelope_to_dict(
         DecodedPacketEnvelope(
-            time=datetime.now(tz=timezone.utc),
+            time=datetime.now(tz=UTC),
             node_id=node_id,
             region=region,
             source="serial",

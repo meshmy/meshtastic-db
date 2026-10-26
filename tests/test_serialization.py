@@ -5,7 +5,7 @@ decode.py can produce (fields, position, identity, UNDECRYPTABLE)."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from meshdb_common.envelope import (
     DecodedPacketEnvelope,
@@ -15,7 +15,7 @@ from meshdb_common.envelope import (
 )
 from meshdb_common.serialization import envelope_from_dict, envelope_to_dict
 
-NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _roundtrip(env: DecodedPacketEnvelope) -> DecodedPacketEnvelope:

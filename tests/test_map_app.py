@@ -6,7 +6,7 @@ Docker), and one integration-marked case proving grafana_ro's grants
 from __future__ import annotations
 
 import importlib.util
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import psycopg
@@ -128,7 +128,7 @@ def test_regions_endpoint_shape():
 
 
 def test_nodes_endpoint_reports_null_position_when_a_node_has_none():
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     rows = [
         (111, "Node One", "N1", "TBEAM", now, 3.1, 101.6, 10.0, now),
         (222, "Node Two", "N2", "HELTEC", None, None, None, None, None),
@@ -203,7 +203,7 @@ def test_grafana_ro_can_read_everything_map_app_queries(ingest_dsn, grafana_ro_d
         write_conn,
         [
             DecodedPacketEnvelope(
-                time=datetime.now(tz=timezone.utc),
+                time=datetime.now(tz=UTC),
                 node_id=node_id,
                 region=region,
                 source="serial",
@@ -213,7 +213,7 @@ def test_grafana_ro_can_read_everything_map_app_queries(ingest_dsn, grafana_ro_d
                 position=PositionFix(latitude=3.14, longitude=101.6, altitude=10.0, location_source=None, ground_speed=None, ground_track=None),
             ),
             DecodedPacketEnvelope(
-                time=datetime.now(tz=timezone.utc),
+                time=datetime.now(tz=UTC),
                 node_id=node_id,
                 region=region,
                 source="serial",
@@ -226,7 +226,7 @@ def test_grafana_ro_can_read_everything_map_app_queries(ingest_dsn, grafana_ro_d
             # a User/NodeInfo packet -- without this, a node that has only
             # ever sent Position/Telemetry wouldn't show up in that endpoint.
             DecodedPacketEnvelope(
-                time=datetime.now(tz=timezone.utc),
+                time=datetime.now(tz=UTC),
                 node_id=node_id,
                 region=region,
                 source="serial",
@@ -247,7 +247,7 @@ def test_grafana_ro_can_read_everything_map_app_queries(ingest_dsn, grafana_ro_d
         assert nodes_response.status_code == 200
         assert nodes_response.json()["nodes"][0]["node_id"] == node_id
 
-        now = int(datetime.now(tz=timezone.utc).timestamp())
+        now = int(datetime.now(tz=UTC).timestamp())
         playback_response = client.get(
             "/api/playback",
             params={"region": region, "metric": "device_metrics.battery_level", "start": now - 3600, "end": now + 3600},
